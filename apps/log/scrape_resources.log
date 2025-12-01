@@ -1,0 +1,73 @@
+Saved https://peps.python.org/pep-0008/ -> /var/www/Meta-Project/apps/scripts/scraped_data/Python/https_peps_python_org_pep_0008.html
+Saved https://docs.python.org/ -> /var/www/Meta-Project/apps/scripts/scraped_data/Python/https_docs_python_org.html
+Saved https://rss.feedspot.com/folder/5hvItF4d6A==/rss/rsscombiner -> /var/www/Meta-Project/apps/scripts/scraped_data/Python/https_rss_feedspot_com_folder_5hvItF4d6A_rss_rsscombiner.html
+Saved https://github.com/airbnb/javascript -> /var/www/Meta-Project/apps/scripts/scraped_data/JavaScript/https_github_com_airbnb_javascript.html
+Saved https://google.github.io/styleguide/jsguide.html -> /var/www/Meta-Project/apps/scripts/scraped_data/JavaScript/https_google_github_io_styleguide_jsguide_html.html
+Saved https://ecma-international.org/publications-and-standards/standards/ecma-262/ -> /var/www/Meta-Project/apps/scripts/scraped_data/JavaScript/https_ecma_international_org_publications_and_standards_standards_ecma_262.html
+Saved https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference -> /var/www/Meta-Project/apps/scripts/scraped_data/JavaScript/https_developer_mozilla_org_en_US_docs_Web_JavaScript_Reference.html
+Saved https://rss.feedspot.com/folder/5hvItF4d6Q==/rss/rsscombiner -> /var/www/Meta-Project/apps/scripts/scraped_data/JavaScript/https_rss_feedspot_com_folder_5hvItF4d6Q_rss_rsscombiner.html
+Saved https://www.oracle.com/java/technologies/javase/codeconventions-contents.html -> /var/www/Meta-Project/apps/scripts/scraped_data/Java/https_www_oracle_com_java_technologies_javase_codeconventions_contents_html.html
+Saved https://docs.oracle.com/en/java/javase/22/docs/api/ -> /var/www/Meta-Project/apps/scripts/scraped_data/Java/https_docs_oracle_com_en_java_javase_22_docs_api.html
+Saved https://rss.feedspot.com/folder/5hvItF4d6g==/rss/rsscombiner -> /var/www/Meta-Project/apps/scripts/scraped_data/Java/https_rss_feedspot_com_folder_5hvItF4d6g_rss_rsscombiner.html
+Saved https://www.typescriptlang.org/docs/handbook/ -> /var/www/Meta-Project/apps/scripts/scraped_data/TypeScript/https_www_typescriptlang_org_docs_handbook.html
+Saved https://www.typescriptlang.org/docs/ -> /var/www/Meta-Project/apps/scripts/scraped_data/TypeScript/https_www_typescriptlang_org_docs.html
+Saved https://rss.feedspot.com/folder/5hvItF4e4w==/rss/rsscombiner -> /var/www/Meta-Project/apps/scripts/scraped_data/TypeScript/https_rss_feedspot_com_folder_5hvItF4e4w_rss_rsscombiner.html
+Saved https://swift.org/documentation/api-design-guidelines/ -> /var/www/Meta-Project/apps/scripts/scraped_data/Swift/https_swift_org_documentation_api_design_guidelines.html
+Saved https://docs.swift.org/swift-book/documentation/the-swift-programming-language/ -> /var/www/Meta-Project/apps/scripts/scraped_data/Swift/https_docs_swift_org_swift_book_documentation_the_swift_programming_language.html
+Saved https://developer.apple.com/documentation/swift/swift-standard-library -> /var/www/Meta-Project/apps/scripts/scraped_data/Swift/https_developer_apple_com_documentation_swift_swift_standard_library.html
+Saved https://rss.feedspot.com/folder/5hvItF4e5A==/rss/rsscombiner -> /var/www/Meta-Project/apps/scripts/scraped_data/Swift/https_rss_feedspot_com_folder_5hvItF4e5A_rss_rsscombiner.html
+Saved https://kotlinlang.org/docs/coding-conventions.html -> /var/www/Meta-Project/apps/scripts/scraped_data/Kotlin/https_kotlinlang_org_docs_coding_conventions_html.html
+Saved https://kotlinlang.org/api/core/kotlin-stdlib/ -> /var/www/Meta-Project/apps/scripts/scraped_data/Kotlin/https_kotlinlang_org_api_core_kotlin_stdlib.html
+Saved https://kotlinlang.org/docs/home.html -> /var/www/Meta-Project/apps/scripts/scraped_data/Kotlin/https_kotlinlang_org_docs_home_html.html
+Saved https://rss.feedspot.com/folder/5hvItF4e5Q==/rss/rsscombiner -> /var/www/Meta-Project/apps/scripts/scraped_data/Kotlin/https_rss_feedspot_com_folder_5hvItF4e5Q_rss_rsscombiner.html
+Saved https://rss.feedspot.com/folder/5hvIs2AZ5g==/rss/rsscombiner -> /var/www/Meta-Project/apps/scripts/scraped_data/Design/https_rss_feedspot_com_folder_5hvIs2AZ5g_rss_rsscombiner.html
+Saved https://rss.feedspot.com/folder/5hvIs2AZ6A==/rss/rsscombiner -> /var/www/Meta-Project/apps/scripts/scraped_data/Design/https_rss_feedspot_com_folder_5hvIs2AZ6A_rss_rsscombiner.html
+Saved https://rss.feedspot.com/folder/5hvIs2AZ6g==/rss/rsscombiner -> /var/www/Meta-Project/apps/scripts/scraped_data/Design/https_rss_feedspot_com_folder_5hvIs2AZ6g_rss_rsscombiner.html
+Saved https://rss.feedspot.com/folder/5hvIs2AZ6Q==/rss/rsscombiner -> /var/www/Meta-Project/apps/scripts/scraped_data/Architecture/https_rss_feedspot_com_folder_5hvIs2AZ6Q_rss_rsscombiner.html
+Traceback (most recent call last):
+  File "/var/www/Meta-Project/apps/scripts/scrape_resources.py", line 119, in <module>
+    main()
+  File "/var/www/Meta-Project/apps/scripts/scrape_resources.py", line 113, in main
+    BASE_DIR.mkdir(parents=True, exist_ok=True)
+    ^^^^^^^^^^^^^^
+AttributeError: 'str' object has no attribute 'mkdir'
+Traceback (most recent call last):
+  File "/var/www/Meta-Project/apps/scripts/scrape_resources.py", line 119, in <module>
+    main()
+  File "/var/www/Meta-Project/apps/scripts/scrape_resources.py", line 113, in main
+    BASE_DIR.mkdir(parents=True, exist_ok=True)
+    ^^^^^^^^^^^^^^
+AttributeError: 'str' object has no attribute 'mkdir'
+Traceback (most recent call last):
+  File "/var/www/Meta-Project/apps/scripts/scrape_resources.py", line 119, in <module>
+    main()
+  File "/var/www/Meta-Project/apps/scripts/scrape_resources.py", line 113, in main
+    BASE_DIR.mkdir(parents=True, exist_ok=True)
+    ^^^^^^^^^^^^^^
+AttributeError: 'str' object has no attribute 'mkdir'
+Saved https://peps.python.org/pep-0008/ -> /var/www/Meta-Project/indexes/Python/https_peps_python_org_pep_0008.html
+Saved https://docs.python.org/ -> /var/www/Meta-Project/indexes/Python/https_docs_python_org.html
+Saved https://rss.feedspot.com/folder/5hvItF4d6A==/rss/rsscombiner -> /var/www/Meta-Project/indexes/Python/https_rss_feedspot_com_folder_5hvItF4d6A_rss_rsscombiner.html
+Saved https://github.com/airbnb/javascript -> /var/www/Meta-Project/indexes/JavaScript/https_github_com_airbnb_javascript.html
+Saved https://google.github.io/styleguide/jsguide.html -> /var/www/Meta-Project/indexes/JavaScript/https_google_github_io_styleguide_jsguide_html.html
+Saved https://ecma-international.org/publications-and-standards/standards/ecma-262/ -> /var/www/Meta-Project/indexes/JavaScript/https_ecma_international_org_publications_and_standards_standards_ecma_262.html
+Saved https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference -> /var/www/Meta-Project/indexes/JavaScript/https_developer_mozilla_org_en_US_docs_Web_JavaScript_Reference.html
+Saved https://rss.feedspot.com/folder/5hvItF4d6Q==/rss/rsscombiner -> /var/www/Meta-Project/indexes/JavaScript/https_rss_feedspot_com_folder_5hvItF4d6Q_rss_rsscombiner.html
+Saved https://www.oracle.com/java/technologies/javase/codeconventions-contents.html -> /var/www/Meta-Project/indexes/Java/https_www_oracle_com_java_technologies_javase_codeconventions_contents_html.html
+Saved https://docs.oracle.com/en/java/javase/22/docs/api/ -> /var/www/Meta-Project/indexes/Java/https_docs_oracle_com_en_java_javase_22_docs_api.html
+Saved https://rss.feedspot.com/folder/5hvItF4d6g==/rss/rsscombiner -> /var/www/Meta-Project/indexes/Java/https_rss_feedspot_com_folder_5hvItF4d6g_rss_rsscombiner.html
+Saved https://www.typescriptlang.org/docs/handbook/ -> /var/www/Meta-Project/indexes/TypeScript/https_www_typescriptlang_org_docs_handbook.html
+Saved https://www.typescriptlang.org/docs/ -> /var/www/Meta-Project/indexes/TypeScript/https_www_typescriptlang_org_docs.html
+Saved https://rss.feedspot.com/folder/5hvItF4e4w==/rss/rsscombiner -> /var/www/Meta-Project/indexes/TypeScript/https_rss_feedspot_com_folder_5hvItF4e4w_rss_rsscombiner.html
+Saved https://swift.org/documentation/api-design-guidelines/ -> /var/www/Meta-Project/indexes/Swift/https_swift_org_documentation_api_design_guidelines.html
+Saved https://docs.swift.org/swift-book/documentation/the-swift-programming-language/ -> /var/www/Meta-Project/indexes/Swift/https_docs_swift_org_swift_book_documentation_the_swift_programming_language.html
+Saved https://developer.apple.com/documentation/swift/swift-standard-library -> /var/www/Meta-Project/indexes/Swift/https_developer_apple_com_documentation_swift_swift_standard_library.html
+Saved https://rss.feedspot.com/folder/5hvItF4e5A==/rss/rsscombiner -> /var/www/Meta-Project/indexes/Swift/https_rss_feedspot_com_folder_5hvItF4e5A_rss_rsscombiner.html
+Saved https://kotlinlang.org/docs/coding-conventions.html -> /var/www/Meta-Project/indexes/Kotlin/https_kotlinlang_org_docs_coding_conventions_html.html
+Saved https://kotlinlang.org/api/core/kotlin-stdlib/ -> /var/www/Meta-Project/indexes/Kotlin/https_kotlinlang_org_api_core_kotlin_stdlib.html
+Saved https://kotlinlang.org/docs/home.html -> /var/www/Meta-Project/indexes/Kotlin/https_kotlinlang_org_docs_home_html.html
+Saved https://rss.feedspot.com/folder/5hvItF4e5Q==/rss/rsscombiner -> /var/www/Meta-Project/indexes/Kotlin/https_rss_feedspot_com_folder_5hvItF4e5Q_rss_rsscombiner.html
+Saved https://rss.feedspot.com/folder/5hvIs2AZ5g==/rss/rsscombiner -> /var/www/Meta-Project/indexes/Design/https_rss_feedspot_com_folder_5hvIs2AZ5g_rss_rsscombiner.html
+Saved https://rss.feedspot.com/folder/5hvIs2AZ6A==/rss/rsscombiner -> /var/www/Meta-Project/indexes/Design/https_rss_feedspot_com_folder_5hvIs2AZ6A_rss_rsscombiner.html
+Saved https://rss.feedspot.com/folder/5hvIs2AZ6g==/rss/rsscombiner -> /var/www/Meta-Project/indexes/Design/https_rss_feedspot_com_folder_5hvIs2AZ6g_rss_rsscombiner.html
+Saved https://rss.feedspot.com/folder/5hvIs2AZ6Q==/rss/rsscombiner -> /var/www/Meta-Project/indexes/Architecture/https_rss_feedspot_com_folder_5hvIs2AZ6Q_rss_rsscombiner.html

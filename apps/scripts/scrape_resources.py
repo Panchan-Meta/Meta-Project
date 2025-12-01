@@ -12,10 +12,11 @@ import sys
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
+
 from pathlib import Path
 from typing import Iterable, Mapping
 
-BASE_DIR = Path(__file__).resolve().parent / "scraped_data"
+BASE_DIR: Path = Path("/var/www/Meta-Project/indexes")
 
 CATEGORIES: Mapping[str, tuple[str, ...]] = {
     "Python": (
