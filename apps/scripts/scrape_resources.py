@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Iterable, Mapping
+from urllib.parse import urljoin
 
 BASE_DIR: Path = Path("/var/www/Meta-Project/indexes")
 
