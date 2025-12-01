@@ -11,10 +11,12 @@ import re
 import sys
 import urllib.error
 import urllib.request
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
-
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Iterable, Mapping
+from urllib.parse import urljoin
 
 BASE_DIR: Path = Path("/var/www/Meta-Project/indexes")
 
@@ -121,12 +123,31 @@ def parse_rss_links(content: bytes) -> list[str]:
     except ET.ParseError:
         return []
 
-    links: list[str] = []
+    links: set[str] = set()
     for item in root.findall(".//item"):
+        base_url = ""
+
         link_el = item.find("link")
         if link_el is not None and link_el.text:
-            links.append(link_el.text.strip())
-    return links
+            base_url = link_el.text.strip()
+            if base_url:
+                links.add(base_url)
+
+        for tag_name in (
+            "description",
+            "{http://purl.org/rss/1.0/modules/content/}encoded",
+        ):
+            tag = item.find(tag_name)
+            if tag is None or not tag.text:
+                continue
+
+            html_fragment = tag.text
+            fragment_links = extract_links_from_html(
+                base_url, html_fragment.encode("utf-8", errors="ignore")
+            )
+            links.update(fragment_links)
+
+    return list(links)
 
 
 def ensure_category(category: str, urls: Iterable[str]) -> None:
