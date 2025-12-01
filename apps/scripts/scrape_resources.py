@@ -11,8 +11,10 @@ import re
 import sys
 import urllib.error
 import urllib.request
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit, urljoin
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
-
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Iterable, Mapping
 
@@ -85,7 +87,13 @@ def remove_old_files(category_dir: Path, threshold: timedelta) -> None:
 
 
 def fetch_and_save(url: str, destination: Path) -> bytes:
-    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    normalized_url = normalize_url(url)
+    if not normalized_url:
+        raise ValueError(f"Invalid URL: {url!r}")
+
+    request = urllib.request.Request(
+        normalized_url, headers={"User-Agent": "Mozilla/5.0"}
+    )
     with urllib.request.urlopen(request, timeout=30) as response:
         content = response.read()
     destination.write_bytes(content)
@@ -115,18 +123,55 @@ def extract_links_from_html(base_url: str, html_content: bytes) -> set[str]:
     return parser.links
 
 
+def normalize_url(url: str) -> str | None:
+    """Percent-encode unsafe characters and validate the scheme."""
+
+    trimmed = url.strip()
+    if not trimmed:
+        return None
+
+    parts = urlsplit(trimmed)
+    if parts.scheme not in {"http", "https"} or not parts.netloc:
+        return None
+
+    safe_path = quote(parts.path, safe="/:%@+$,;*=()[]'")
+    safe_query = urlencode(parse_qsl(parts.query, keep_blank_values=True), doseq=True)
+
+    normalized = urlunsplit((parts.scheme, parts.netloc, safe_path, safe_query, ""))
+    return normalized
+
+
 def parse_rss_links(content: bytes) -> list[str]:
     try:
         root = ET.fromstring(content)
     except ET.ParseError:
         return []
 
-    links: list[str] = []
+    links: set[str] = set()
     for item in root.findall(".//item"):
+        base_url = ""
+
         link_el = item.find("link")
         if link_el is not None and link_el.text:
-            links.append(link_el.text.strip())
-    return links
+            base_url = link_el.text.strip()
+            if base_url:
+                links.add(base_url)
+
+        for tag_name in (
+            "description",
+            "{http://purl.org/rss/1.0/modules/content/}encoded",
+        ):
+            tag = item.find(tag_name)
+            if tag is None or not tag.text:
+                continue
+
+            html_fragment = tag.text
+            fragment_links = extract_links_from_html(
+                base_url, html_fragment.encode("utf-8", errors="ignore")
+            )
+            links.update(fragment_links)
+
+    return list(links)
 
 
 def ensure_category(category: str, urls: Iterable[str]) -> None:
@@ -169,6 +214,11 @@ def ensure_category(category: str, urls: Iterable[str]) -> None:
                                     f"Request error while fetching nested {nested_link}: {exc}",
                                     file=sys.stderr,
                                 )
+                            except ValueError as exc:
+                                print(
+                                    f"Skipped invalid nested URL {nested_link}: {exc}",
+                                    file=sys.stderr,
+                                )
                             except OSError as exc:
                                 print(
                                     f"Filesystem error for nested {nested_target}: {exc}",
@@ -184,6 +234,10 @@ def ensure_category(category: str, urls: Iterable[str]) -> None:
                             f"Request error while fetching RSS item {rss_link}: {exc}",
                             file=sys.stderr,
                         )
+                    except ValueError as exc:
+                        print(
+                            f"Skipped invalid RSS URL {rss_link}: {exc}", file=sys.stderr
+                        )
                     except OSError as exc:
                         print(
                             f"Filesystem error for RSS item {article_target}: {exc}",
@@ -193,6 +247,8 @@ def ensure_category(category: str, urls: Iterable[str]) -> None:
             print(f"HTTP error while fetching {url}: {exc}", file=sys.stderr)
         except urllib.error.URLError as exc:
             print(f"Request error while fetching {url}: {exc}", file=sys.stderr)
+        except ValueError as exc:
+            print(f"Skipped invalid feed URL {url}: {exc}", file=sys.stderr)
         except OSError as exc:
             print(f"Filesystem error for {target}: {exc}", file=sys.stderr)
 
