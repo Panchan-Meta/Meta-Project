@@ -84,11 +84,49 @@ def remove_old_files(category_dir: Path, threshold: timedelta) -> None:
             path.unlink(missing_ok=True)
 
 
-def fetch_and_save(url: str, destination: Path) -> None:
+def fetch_and_save(url: str, destination: Path) -> bytes:
     request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(request, timeout=30) as response:
         content = response.read()
     destination.write_bytes(content)
+    return content
+
+
+def extract_links_from_html(base_url: str, html_content: bytes) -> set[str]:
+    class LinkParser(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__()
+            self.links: set[str] = set()
+
+        def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+            if tag.lower() != "a":
+                return
+            for attr, value in attrs:
+                if attr.lower() == "href" and value:
+                    joined = urljoin(base_url, value)
+                    if joined.startswith("http://") or joined.startswith("https://"):
+                        self.links.add(joined)
+
+    parser = LinkParser()
+    try:
+        parser.feed(html_content.decode("utf-8", errors="ignore"))
+    except Exception:
+        return set()
+    return parser.links
+
+
+def parse_rss_links(content: bytes) -> list[str]:
+    try:
+        root = ET.fromstring(content)
+    except ET.ParseError:
+        return []
+
+    links: list[str] = []
+    for item in root.findall(".//item"):
+        link_el = item.find("link")
+        if link_el is not None and link_el.text:
+            links.append(link_el.text.strip())
+    return links
 
 
 def ensure_category(category: str, urls: Iterable[str]) -> None:
@@ -100,8 +138,57 @@ def ensure_category(category: str, urls: Iterable[str]) -> None:
         filename = sanitize_filename(url) + ".html"
         target = category_dir / filename
         try:
-            fetch_and_save(url, target)
+            content = fetch_and_save(url, target)
             print(f"Saved {url} -> {target}")
+
+            rss_links = parse_rss_links(content)
+            if rss_links:
+                for rss_link in rss_links:
+                    article_name = sanitize_filename(rss_link) + ".html"
+                    article_target = category_dir / article_name
+                    try:
+                        article_content = fetch_and_save(rss_link, article_target)
+                        print(f"Saved RSS item {rss_link} -> {article_target}")
+                        for nested_link in extract_links_from_html(rss_link, article_content):
+                            nested_name = sanitize_filename(nested_link) + ".html"
+                            nested_target = category_dir / nested_name
+                            if nested_target.exists():
+                                continue
+                            try:
+                                fetch_and_save(nested_link, nested_target)
+                                print(
+                                    f"Saved nested link {nested_link} -> {nested_target}"
+                                )
+                            except urllib.error.HTTPError as exc:
+                                print(
+                                    f"HTTP error while fetching nested {nested_link}: {exc}",
+                                    file=sys.stderr,
+                                )
+                            except urllib.error.URLError as exc:
+                                print(
+                                    f"Request error while fetching nested {nested_link}: {exc}",
+                                    file=sys.stderr,
+                                )
+                            except OSError as exc:
+                                print(
+                                    f"Filesystem error for nested {nested_target}: {exc}",
+                                    file=sys.stderr,
+                                )
+                    except urllib.error.HTTPError as exc:
+                        print(
+                            f"HTTP error while fetching RSS item {rss_link}: {exc}",
+                            file=sys.stderr,
+                        )
+                    except urllib.error.URLError as exc:
+                        print(
+                            f"Request error while fetching RSS item {rss_link}: {exc}",
+                            file=sys.stderr,
+                        )
+                    except OSError as exc:
+                        print(
+                            f"Filesystem error for RSS item {article_target}: {exc}",
+                            file=sys.stderr,
+                        )
         except urllib.error.HTTPError as exc:
             print(f"HTTP error while fetching {url}: {exc}", file=sys.stderr)
         except urllib.error.URLError as exc:
