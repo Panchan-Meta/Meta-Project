@@ -225,6 +225,11 @@ def ensure_category(category: str, urls: Iterable[str]) -> None:
                                     f"Filesystem error for nested {nested_target}: {exc}",
                                     file=sys.stderr,
                                 )
+                            except Exception as exc:  # pragma: no cover - safety net
+                                print(
+                                    f"Unexpected error while fetching nested {nested_link}: {exc}",
+                                    file=sys.stderr,
+                                )
                     except urllib.error.HTTPError as exc:
                         print(
                             f"HTTP error while fetching RSS item {rss_link}: {exc}",
@@ -244,6 +249,11 @@ def ensure_category(category: str, urls: Iterable[str]) -> None:
                             f"Filesystem error for RSS item {article_target}: {exc}",
                             file=sys.stderr,
                         )
+                    except Exception as exc:  # pragma: no cover - safety net
+                        print(
+                            f"Unexpected error while handling RSS item {rss_link}: {exc}",
+                            file=sys.stderr,
+                        )
         except urllib.error.HTTPError as exc:
             print(f"HTTP error while fetching {url}: {exc}", file=sys.stderr)
         except urllib.error.URLError as exc:
@@ -252,6 +262,11 @@ def ensure_category(category: str, urls: Iterable[str]) -> None:
             print(f"Skipped invalid feed URL {url}: {exc}", file=sys.stderr)
         except OSError as exc:
             print(f"Filesystem error for {target}: {exc}", file=sys.stderr)
+        except Exception as exc:  # pragma: no cover - safety net
+            print(
+                f"Unexpected error while processing feed {url}: {exc}",
+                file=sys.stderr,
+            )
 
 
 def main() -> None:

@@ -176,6 +176,12 @@ def process_category(category: str, feeds: Iterable[str]) -> None:
         except (ValueError, OSError) as exc:
             print(f"Failed to store feed {feed_url}: {exc}", file=sys.stderr)
             continue
+        except Exception as exc:  # pragma: no cover - safety net
+            print(
+                f"Unexpected error while processing feed {feed_url}: {exc}",
+                file=sys.stderr,
+            )
+            continue
 
         item_links = parse_rss_links(feed_content)
         for item_link in item_links:
@@ -199,6 +205,12 @@ def process_category(category: str, feeds: Iterable[str]) -> None:
             except (ValueError, OSError) as exc:
                 print(f"Failed to store article {item_link}: {exc}", file=sys.stderr)
                 continue
+            except Exception as exc:  # pragma: no cover - safety net
+                print(
+                    f"Unexpected error while handling article {item_link}: {exc}",
+                    file=sys.stderr,
+                )
+                continue
 
             for nested_link in extract_links_from_html(item_link, article_content):
                 nested_name = sanitize_filename(nested_link) + ".html"
@@ -221,6 +233,11 @@ def process_category(category: str, feeds: Iterable[str]) -> None:
                 except (ValueError, OSError) as exc:
                     print(
                         f"Skipped nested link {nested_link} due to error: {exc}",
+                        file=sys.stderr,
+                    )
+                except Exception as exc:  # pragma: no cover - safety net
+                    print(
+                        f"Unexpected error while fetching nested {nested_link}: {exc}",
                         file=sys.stderr,
                     )
 
