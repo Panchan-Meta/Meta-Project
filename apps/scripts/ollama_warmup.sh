@@ -8,6 +8,7 @@ BASE_URL="http://${UBUNTU_IP}:${PORT}"
 
 # ---- 1. サーバが生きているか簡易チェック（関連 fetch）----
 # /api/tags を叩いて daemon 起動確認だけしておく
+echo "[ollama-warmup] ウォームアップを開始します (BASE_URL=${BASE_URL})"
 curl -sS "${BASE_URL}/api/tags" > /dev/null 2>&1 || exit 0
 
 # ---- 2. モデルを pull（既にある場合は何もしない）----
@@ -18,6 +19,7 @@ ollama pull llama3:8b   > /dev/null 2>&1 || true
 warm_model () {
   local model="$1"
 
+  echo "[ollama-warmup] モデル '${model}' のウォームアップを開始します"
   curl -sS -X POST "${BASE_URL}/api/generate" \
     -H "Content-Type: application/json" \
     -d '{
@@ -26,7 +28,11 @@ warm_model () {
       "stream": false
     }' \
     > /dev/null 2>&1 || true
+
+  echo "[ollama-warmup] モデル '${model}' のウォームアップが完了しました"
 }
 
 warm_model "phi3:mini"
 warm_model "llama3:8b"
+
+echo "[ollama-warmup] すべてのウォームアップが完了しました"
