@@ -569,11 +569,8 @@ def _slugify(text: str) -> str:
     return slug[:64] or "blog"
 
 
-def main() -> None:
-    args = parse_args()
-    prompt = args.prompt or html.unescape(os.sys.stdin.read()).strip()
-    if not prompt:
-        raise SystemExit("クライアントの文章が指定されていません")
+def generate_blogs(prompt: str, output_dir: Path = DEFAULT_OUTPUT_DIR) -> dict[str, object]:
+    """Generate and persist multilingual blogs, returning metadata and HTML bodies."""
 
     warm_model("phi3:mini")
     warm_model("llama3:8b")
@@ -586,10 +583,17 @@ def main() -> None:
     common_text = read_snippet(common_candidates)
 
     slug = _slugify(prompt)
-    output_dir = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
     packs = get_language_packs()
+    results: dict[str, object] = {
+        "category": category,
+        "flag": "FLAG:FILES_SENT",
+        "slug": slug,
+        "files": {},
+        "html": {},
+    }
+
     for pack in packs:
         article_html = build_article(
             prompt,
@@ -600,9 +604,23 @@ def main() -> None:
         )
         output_path = output_dir / f"{slug}_{pack.code}.html"
         output_path.write_text(article_html, encoding="utf-8")
-        print(f"Saved blog HTML to {output_path}")
+        results["files"][pack.code] = str(output_path)
+        results["html"][pack.code] = article_html
 
-    print("FLAG:FILES_SENT")
+    return results
+
+
+def main() -> None:
+    args = parse_args()
+    prompt = args.prompt or html.unescape(os.sys.stdin.read()).strip()
+    if not prompt:
+        raise SystemExit("クライアントの文章が指定されていません")
+
+    results = generate_blogs(prompt, output_dir=args.output_dir)
+    for code, path in results.get("files", {}).items():
+        print(f"Saved blog HTML ({code}) to {path}")
+
+    print(results.get("flag", "FLAG:FILES_SENT"))
 
 
 if __name__ == "__main__":
