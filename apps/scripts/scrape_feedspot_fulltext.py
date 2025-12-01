@@ -8,6 +8,7 @@ For each configured category, the script:
 """
 from __future__ import annotations
 
+import hashlib
 import re
 import sys
 import urllib.error
@@ -58,12 +59,18 @@ def safe_directory_name(name: str) -> str:
     return cleaned or "category"
 
 
-def sanitize_filename(url: str) -> str:
-    """Convert a URL into a safe filename fragment."""
+def sanitize_filename(url: str, max_length: int = 200) -> str:
+    """Convert a URL into a safe, bounded-length filename fragment."""
 
     parsed = re.sub(r"[^a-zA-Z0-9]+", "_", url)
-    trimmed = parsed.strip("_")
-    return trimmed or "resource"
+    trimmed = parsed.strip("_") or "resource"
+
+    if len(trimmed) > max_length:
+        digest = hashlib.sha256(url.encode("utf-8", "ignore")).hexdigest()[:12]
+        available = max_length - len(digest) - 1
+        trimmed = f"{trimmed[:available]}_{digest}" if available > 0 else digest
+
+    return trimmed
 
 
 def normalize_url(url: str) -> str | None:
