@@ -18,9 +18,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Mapping
 
+import requests
+
 BASE_DIR = Path("/var/www/Meta-Project")
 INDEX_DIR = BASE_DIR / "indexes"
 DEFAULT_OUTPUT_DIR = Path("/mnt/hgfs/output")
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate")
+LLM_TIMEOUT = 900
 SCRIPT_CATEGORY_FILES = [
     "Web3",
     "NFT",
@@ -198,6 +202,29 @@ class Section:
     heading: str
     body: str
     diagram_html: str
+    chart_note: str
+
+
+def _post_llm(model: str, prompt: str, *, system: str | None = None) -> str:
+    payload: dict[str, object] = {
+        "model": model,
+        "prompt": prompt,
+        "stream": False,
+    }
+    if system:
+        payload["system"] = system
+
+    try:
+        response = requests.post(OLLAMA_URL, json=payload, timeout=LLM_TIMEOUT)
+        response.raise_for_status()
+        data = response.json()
+        return str(data.get("response", "")).strip()
+    except Exception as exc:  # noqa: BLE001
+        return f"[LLM error: {exc}]"
+
+
+def warm_model(model: str) -> None:
+    _post_llm(model, prompt="warmup ping")
 
 
 def read_snippet(path_candidates: Iterable[Path]) -> str:
@@ -251,6 +278,39 @@ def choose_category(prompt: str, category_snippets: Mapping[str, str]) -> str:
     if scores[best] == 0:
         return "Web3"
     return best
+
+
+def classify_with_llm(prompt: str, category_snippets: Mapping[str, str]) -> str | None:
+    """Use the LLM once to propose a category based on provided snippets."""
+
+    category_list = "\n".join(f"- {name}" for name in SCRIPT_CATEGORY_FILES)
+    snippets = "\n".join(
+        f"{name}: {snippet[:800]}" for name, snippet in category_snippets.items()
+    )
+    system = (
+        "あなたは分類器です。以下のカテゴリ一覧から最も近い1つを日本語で返してください。"
+        "カテゴリ名のみを返し、説明文は不要です。"
+    )
+    prompt_body = textwrap.dedent(
+        f"""
+        クライアントからの文章:
+        {prompt}
+
+        利用可能なカテゴリ:
+        {category_list}
+
+        参考スニペット:
+        {snippets or '（スニペットなし）'}
+        """
+    )
+    llm_answer = _post_llm("phi3:mini", prompt_body, system=system)
+    if not llm_answer:
+        return None
+
+    for name in SCRIPT_CATEGORY_FILES:
+        if name.lower() in llm_answer.lower():
+            return name
+    return None
 
 
 def _deterministic_numbers(prompt: str, count: int, scale: int) -> list[int]:
@@ -350,34 +410,76 @@ def _cos_deg(angle: float) -> float:
     return math.cos(math.radians(angle))
 
 
-def generate_sections(prompt: str, category: str, pack: LanguagePack) -> list[Section]:
+def summarize_section_with_llm(
+    prompt: str,
+    category: str,
+    theme: str,
+    pack: LanguagePack,
+    category_snippet: str,
+) -> str:
+    system = (
+        "You are a structured blog assistant. Keep the language aligned to the user locale."
+    )
+    body = textwrap.dedent(
+        f"""
+        Write 3-4 sentences in {pack.code} summarizing the client theme for persona Yohane.
+        Theme keyword: {theme}
+        Chosen category: {category}
+        Client prompt: {prompt}
+        Category reference (trimmed):
+        {category_snippet[:1200] or 'N/A'}
+        Keep it analytical, skeptical, and reflective.
+        """
+    )
+    return _post_llm("llama3:8b", body, system=system)
+
+
+def explain_chart_with_llm(values: list[int], labels: list[str], theme: str, pack: LanguagePack) -> str:
+    system = "Provide concise chart commentary matching the locale."
+    prompt_body = textwrap.dedent(
+        f"""
+        Summarize the following synthetic chart insightfully in {pack.code}. Keep it to 2 sentences.
+        Theme: {theme}
+        Labels and values: {list(zip(labels, values))}
+        Persona tone: calm, critical, and slightly punk.
+        """
+    )
+    return _post_llm("llama3:8b", prompt_body, system=system)
+
+
+def generate_sections(
+    prompt: str, category: str, pack: LanguagePack, *, category_snippet: str
+) -> list[Section]:
     base = _deterministic_numbers(prompt + category + pack.code, 12, 9)
     sections: list[Section] = []
 
     for idx, theme in enumerate(pack.themes):
         if idx % 3 == 0:
             values = base[idx : idx + 3]
+            labels = pack.chart_labels["bar"]
             diagram = build_bar_chart(
                 values,
-                pack.chart_labels["bar"],
+                labels,
                 title=pack.chart_titles["bar"],
                 caption=pack.chart_captions["bar"],
                 aria_label=pack.chart_titles["bar"],
             )
         elif idx % 3 == 1:
             values = base[idx : idx + 4]
+            labels = pack.chart_labels["line"]
             diagram = build_line_chart(
                 values,
-                pack.chart_labels["line"],
+                labels,
                 title=pack.chart_titles["line"],
                 caption=pack.chart_captions["line"],
                 aria_label=pack.chart_titles["line"],
             )
         else:
             values = base[idx : idx + 3]
+            labels = pack.chart_labels["pie"]
             diagram = build_pie_chart(
                 values,
-                pack.chart_labels["pie"],
+                labels,
                 title=pack.chart_titles["pie"],
                 caption=pack.chart_captions["pie"],
                 aria_label=pack.chart_titles["pie"],
@@ -387,7 +489,17 @@ def generate_sections(prompt: str, category: str, pack: LanguagePack) -> list[Se
             pack.section_body_template.format(prompt=prompt, category=category, theme=theme)
         ).strip()
 
-        sections.append(Section(heading=theme, body=body, diagram_html=diagram))
+        llm_summary = summarize_section_with_llm(prompt, category, theme, pack, category_snippet)
+        chart_note = explain_chart_with_llm(values, labels, theme, pack)
+
+        sections.append(
+            Section(
+                heading=theme,
+                body=body + "\n" + llm_summary,
+                diagram_html=diagram,
+                chart_note=chart_note,
+            )
+        )
     return sections
 
 
@@ -408,6 +520,7 @@ def compose_html(title: str, description: str, intro: str, sections: list[Sectio
         body_parts.append(f"<h2>{html.escape(section.heading)}</h2>")
         body_parts.append(f"<p>{html.escape(section.body)}</p>")
         body_parts.append(section.diagram_html)
+        body_parts.append(f"<p class='chart-note'>{html.escape(section.chart_note)}</p>")
     body_parts.append(f"<h2>Outro</h2><p>{html.escape(outro)}</p>")
 
     html_doc = "\n".join(body_parts)
@@ -417,8 +530,15 @@ def compose_html(title: str, description: str, intro: str, sections: list[Sectio
     return "<article>" + html_doc + "</article>"
 
 
-def build_article(prompt: str, pack: LanguagePack, *, category: str, common_text: str) -> str:
-    sections = generate_sections(prompt, category, pack)
+def build_article(
+    prompt: str,
+    pack: LanguagePack,
+    *,
+    category: str,
+    common_text: str,
+    category_snippet: str,
+) -> str:
+    sections = generate_sections(prompt, category, pack, category_snippet=category_snippet)
     title = pack.title_template.format(category=category or "")
     outro = build_outro(common_text, pack)
     return compose_html(
@@ -455,9 +575,12 @@ def main() -> None:
     if not prompt:
         raise SystemExit("クライアントの文章が指定されていません")
 
+    warm_model("phi3:mini")
+    warm_model("llama3:8b")
+
     category_files = discover_category_files(INDEX_DIR)
     category_snippets = {name: read_snippet([path]) for name, path in category_files.items()}
-    category = choose_category(prompt, category_snippets)
+    category = classify_with_llm(prompt, category_snippets) or choose_category(prompt, category_snippets)
 
     common_candidates = [INDEX_DIR / name for name in COMMON_FILES] + [INDEX_DIR / (name + ".txt") for name in COMMON_FILES]
     common_text = read_snippet(common_candidates)
@@ -468,7 +591,13 @@ def main() -> None:
 
     packs = get_language_packs()
     for pack in packs:
-        article_html = build_article(prompt, pack, category=category, common_text=common_text)
+        article_html = build_article(
+            prompt,
+            pack,
+            category=category,
+            common_text=common_text,
+            category_snippet=category_snippets.get(category, ""),
+        )
         output_path = output_dir / f"{slug}_{pack.code}.html"
         output_path.write_text(article_html, encoding="utf-8")
         print(f"Saved blog HTML to {output_path}")
