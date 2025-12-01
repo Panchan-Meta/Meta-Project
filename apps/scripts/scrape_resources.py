@@ -11,14 +11,12 @@ import re
 import sys
 import urllib.error
 import urllib.request
-import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
-from html.parser import HTMLParser
+
 from pathlib import Path
 from typing import Iterable, Mapping
-from urllib.parse import urljoin
 
-BASE_DIR = Path(__file__).resolve().parent / "scraped_data"
+BASE_DIR: Path = Path("/var/www/Meta-Project/indexes")
 
 CATEGORIES: Mapping[str, tuple[str, ...]] = {
     "Python": (
