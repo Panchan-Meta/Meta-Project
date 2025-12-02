@@ -343,6 +343,29 @@ def read_snippet(path_candidates: Iterable[Path]) -> str:
     return "\n\n".join(snippets)
 
 
+def collect_section_snippet(index_dir: Path, theme: str, *, limit: int = 3) -> str:
+    """Collect snippet text for a theme by scanning the index directory.
+
+    The theme is split into lightweight tokens and used to pick a small number
+    of matching files or directories under ``index_dir``. The function limits
+    traversal to avoid expensive walks.
+    """
+
+    tokens = [token.lower() for token in re.split(r"[^\w]+", theme) if token]
+    if not tokens or not index_dir.exists():
+        return ""
+
+    candidates: list[Path] = []
+    for path in sorted(index_dir.iterdir()):
+        name = (path.stem if path.is_file() else path.name).lower()
+        if any(token in name for token in tokens):
+            candidates.append(path)
+        if len(candidates) >= limit:
+            break
+
+    return read_snippet(candidates)
+
+
 def discover_category_files(index_dir: Path) -> Mapping[str, Path]:
     """Map canonical category names to existing files under the index directory."""
 
@@ -854,6 +877,9 @@ def generate_sections(
         sections: list[Section] = []
 
         for idx, theme in enumerate(pack.themes):
+            section_snippet = collect_section_snippet(INDEX_DIR, theme)
+            snippet_for_llm = section_snippet or category_snippet
+
             if idx % 3 == 0:
                 values = base[idx : idx + 3]
                 labels = pack.chart_labels["bar"]
@@ -899,7 +925,7 @@ def generate_sections(
                 category,
                 theme,
                 pack,
-                category_snippet,
+                snippet_for_llm,
                 values=values,
                 labels=labels,
                 chart_title=chart_title,
