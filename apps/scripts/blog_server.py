@@ -7,7 +7,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-from blog_builder import DEFAULT_OUTPUT_DIR, generate_blogs
+from blog_builder import DEFAULT_OUTPUT_DIR, STATUS_REPORTER, generate_blogs
 
 
 class BlogRequestHandler(BaseHTTPRequestHandler):
@@ -55,8 +55,17 @@ class BlogRequestHandler(BaseHTTPRequestHandler):
             "flag": flag,
             "files": {code: Path(path).name for code, path in files_map.items()},
             "category": results.get("category") if isinstance(results, dict) else None,
+            "status_updates": STATUS_REPORTER.pop_messages(include_current=True),
         }
         self._send_json(response)
+
+    def do_GET(self) -> None:  # noqa: N802 (HTTP verb casing)
+        if self.path != "/api/status":
+            self._send_json({"ok": False, "error": "not_found"}, status=HTTPStatus.NOT_FOUND)
+            return
+
+        updates = STATUS_REPORTER.pop_messages(include_current=True)
+        self._send_json({"ok": True, "updates": updates})
 
 
 def run(host: str = "0.0.0.0", port: int = 8000) -> None:
