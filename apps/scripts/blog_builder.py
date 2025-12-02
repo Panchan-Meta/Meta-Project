@@ -310,7 +310,13 @@ def warm_model(model: str) -> None:
 
 
 def read_snippet(path_candidates: Iterable[Path]) -> str:
-    """Return concatenated snippets from available files, ignore missing ones."""
+    """Return concatenated snippets from available files or directories.
+
+    The index directory may contain per-category folders (e.g., ``indexes/Python``)
+    rather than flat files. To honor that layout we gather a few readable files
+    from each candidate directory while still supporting direct file paths.
+    Missing or unreadable files are skipped.
+    """
 
     snippets: list[str] = []
     for path in path_candidates:
@@ -319,6 +325,21 @@ def read_snippet(path_candidates: Iterable[Path]) -> str:
                 snippets.append(path.read_text(encoding="utf-8"))
             except OSError:
                 continue
+            continue
+
+        if path.is_dir():
+            try:
+                # Prefer a small, deterministic subset to avoid traversing
+                # excessively large trees.
+                for child in sorted(path.iterdir())[:5]:
+                    if child.is_file():
+                        try:
+                            snippets.append(child.read_text(encoding="utf-8"))
+                        except OSError:
+                            continue
+            except OSError:
+                continue
+
     return "\n\n".join(snippets)
 
 
@@ -330,12 +351,12 @@ def discover_category_files(index_dir: Path) -> Mapping[str, Path]:
         return mapping
 
     for path in index_dir.iterdir():
-        if not path.is_file():
-            continue
-        stem = path.stem
+        candidate_name = path.stem if path.is_file() else path.name
         for name in SCRIPT_CATEGORY_FILES:
-            if stem.lower().startswith(name.lower().replace(" & ", " ")):
+            normalized = name.lower().replace(" & ", " ")
+            if candidate_name.lower().startswith(normalized):
                 mapping[name] = path
+                break
     return mapping
 
 
