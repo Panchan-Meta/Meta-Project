@@ -2,9 +2,10 @@
 
 This script reads domain knowledge from ``/var/www/Meta-Project/indexes`` and
 categorizes a client-provided prompt into one of the predefined blog domains.
-It then assembles a ~10,000 character HTML article tailored for the persona
-"哲学者気取りのヨハネ", including diagrams per section and an outro informed by
-shared knowledge files.
+It now produces compact, two-section HTML articles (main section + summary)
+totalling roughly 1,000 characters across Japanese, English, and Italian,
+tailored for the persona "哲学者気取りのヨハネ" and enriched by shared
+knowledge files.
 """
 from __future__ import annotations
 
@@ -29,7 +30,9 @@ INDEX_DIR = BASE_DIR / "indexes"
 DEFAULT_OUTPUT_DIR = Path("/mnt/hgfs/output")
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate")
 LLM_TIMEOUT = int(os.environ.get("LLM_TIMEOUT", "120"))
-MIN_SECTION_CHARS = int(os.environ.get("MIN_SECTION_CHARS", "750"))
+MIN_SECTION_CHARS = int(os.environ.get("MIN_SECTION_CHARS", "350"))
+MAIN_SECTION_TARGET_CHARS = int(os.environ.get("MAIN_SECTION_TARGET_CHARS", "650"))
+MAX_ARTICLE_CHARS = int(os.environ.get("MAX_ARTICLE_CHARS", "1000"))
 LLM_MAX_TOKENS = int(os.environ.get("LLM_MAX_TOKENS", "900"))
 SECTION_MODEL = os.environ.get("BLOG_BUILDER_SECTION_MODEL", "phi3:mini")
 CLASSIFIER_MODEL = os.environ.get("BLOG_BUILDER_CLASSIFIER_MODEL", "phi3:mini")
@@ -62,6 +65,7 @@ class LanguagePack:
     section_body_template: str
     context_line: str
     summary_heading: str
+    main_heading: str
     chart_labels: dict[str, list[str]]
     chart_titles: dict[str, str]
     chart_captions: dict[str, str]
@@ -95,6 +99,7 @@ def get_language_packs() -> list[LanguagePack]:
                 "盲目的な熱狂ではなく自分で考え抜くためのフレームを組み立てる。"
             ),
             summary_heading="総論",
+            main_heading="メインセクション",
             chart_labels={
                 "bar": ["技術", "市場", "文化"],
                 "line": ["短期", "中期", "長期", "その先"],
@@ -141,6 +146,7 @@ def get_language_packs() -> list[LanguagePack]:
                 " that resists blind hype."
             ),
             summary_heading="Conclusion",
+            main_heading="Main section",
             chart_labels={
                 "bar": ["Tech", "Markets", "Culture"],
                 "line": ["Short", "Mid", "Long", "Beyond"],
@@ -186,6 +192,7 @@ def get_language_packs() -> list[LanguagePack]:
                 " costruire un frame di pensiero autonomo lontano dall'entusiasmo cieco."
             ),
             summary_heading="Conclusione",
+            main_heading="Sezione principale",
             chart_labels={
                 "bar": ["Tecnologia", "Mercati", "Cultura"],
                 "line": ["Breve", "Medio", "Lungo", "Oltre"],
@@ -726,6 +733,14 @@ def _ensure_minimum_length(
     return text
 
 
+def _truncate_to_chars(text: str, *, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    if limit <= 0:
+        return ""
+    return text[: max(limit - 1, 0)].rstrip() + "…"
+
+
 def _fallback_section_summary(
     *,
     prompt: str,
@@ -909,92 +924,94 @@ def explain_chart_with_llm(
     return _clean_text(llm_text)
 
 
+def _summarize_main_section(
+    *,
+    prompt: str,
+    category: str,
+    pack: LanguagePack,
+    combined_snippet: str,
+) -> str:
+    target_chars = min(MAX_ARTICLE_CHARS - 200, MAIN_SECTION_TARGET_CHARS)
+    if pack.code == "ja":
+        system = "あなたは日本語で端的に執筆するブログライターです。"
+        body = textwrap.dedent(
+            f"""
+            クライアント指示を要約し、分類結果「{category}」に沿ったメインセクションを{target_chars}文字以内で作成してください。
+            /indexes配下のスニペットと共有知識（Berkshire, bible, catholic, mybrain）を下に引用せず要約し、翻訳や英語併記は禁止。
+            全体の口調は冷静で批判的、少しパンクに。重複や箇条書きは避け、連続した短い段落でまとめる。
+            利用できる素材:
+            {combined_snippet[:1200] or 'N/A'}
+            """
+        )
+    elif pack.code == "it":
+        system = "Scrivi in italiano in modo conciso e coerente."
+        body = textwrap.dedent(
+            f"""
+            Riassumi le istruzioni del cliente e la categoria "{category}" in una sezione principale entro {target_chars} caratteri.
+            Usa gli appunti estratti da /indexes e dalle fonti Berkshire, bible, catholic, mybrain come contesto, senza citazioni dirette.
+            Tono calmo, critico e leggermente punk; niente punti elenco, niente ripetizioni.
+            Testo di riferimento:
+            {combined_snippet[:1200] or 'N/A'}
+            """
+        )
+    else:
+        system = "Write a compact English main section with analytical calm."
+        body = textwrap.dedent(
+            f"""
+            Summarize the client brief under the category "{category}" in under {target_chars} characters.
+            Use the extracted /indexes notes plus Berkshire, bible, catholic, and mybrain context; do not quote directly.
+            Keep a critical, quietly punk tone without bullet points or repetition.
+            Reference material:
+            {combined_snippet[:1200] or 'N/A'}
+            """
+        )
+
+    llm_text = _post_llm(SECTION_MODEL, body, system=system)
+    if _is_llm_error(llm_text):
+        return _truncate_to_chars(_clean_text(combined_snippet or prompt), limit=target_chars)
+    return _truncate_to_chars(_clean_text(llm_text), limit=target_chars)
+
+
+def _enforce_total_char_limit(main_body: str, summary_body: str) -> tuple[str, str]:
+    total = len(main_body) + len(summary_body)
+    if total <= MAX_ARTICLE_CHARS:
+        return main_body, summary_body
+
+    main_limit = max(MIN_SECTION_CHARS, MAX_ARTICLE_CHARS - len(summary_body))
+    main_body = _truncate_to_chars(main_body, limit=max(main_limit, 0))
+    total = len(main_body) + len(summary_body)
+    if total > MAX_ARTICLE_CHARS:
+        summary_body = _truncate_to_chars(summary_body, limit=max(MAX_ARTICLE_CHARS - len(main_body), 0))
+    return main_body, summary_body
+
+
 def generate_sections(
-    prompt: str, category: str, pack: LanguagePack, *, category_snippet: str
+    prompt: str, category: str, pack: LanguagePack, *, category_snippet: str, common_text: str
 ) -> list[Section]:
     with status_scope(f"generate_sections:{pack.code}"):
-        base = _deterministic_numbers(prompt + category + pack.code, 12, 9)
-        sections: list[Section] = []
+        combined_snippet = _clean_text("\n\n".join(filter(None, [category_snippet, common_text])))
+        main_body = _summarize_main_section(
+            prompt=prompt,
+            category=category,
+            pack=pack,
+            combined_snippet=combined_snippet,
+        )
+        main_body = _ensure_minimum_length(
+            main_body,
+            min_chars=MIN_SECTION_CHARS,
+            padding_phrase=pack.padding_phrase,
+            theme=pack.main_heading,
+            category=category,
+        )
 
-        for idx, theme in enumerate(pack.themes):
-            section_snippet = collect_section_snippet(INDEX_DIR, theme)
-            snippet_for_llm = section_snippet or category_snippet
-
-            if idx % 3 == 0:
-                values = base[idx : idx + 3]
-                labels = pack.chart_labels["bar"]
-                diagram = build_bar_chart(
-                    values,
-                    labels,
-                    title=pack.chart_titles["bar"],
-                    caption=pack.chart_captions["bar"],
-                    aria_label=pack.chart_titles["bar"],
-                )
-            elif idx % 3 == 1:
-                values = base[idx : idx + 4]
-                labels = pack.chart_labels["line"]
-                diagram = build_line_chart(
-                    values,
-                    labels,
-                    title=pack.chart_titles["line"],
-                    caption=pack.chart_captions["line"],
-                    aria_label=pack.chart_titles["line"],
-                )
-            else:
-                values = base[idx : idx + 3]
-                labels = pack.chart_labels["pie"]
-                diagram = build_pie_chart(
-                    values,
-                    labels,
-                    title=pack.chart_titles["pie"],
-                    caption=pack.chart_captions["pie"],
-                    aria_label=pack.chart_titles["pie"],
-                )
-
-            body = textwrap.dedent(
-                pack.section_body_template.format(
-                    category=category, theme=theme, context=pack.context_line
-                )
-            ).strip()
-
-            chart_title = pack.chart_titles[
-                "bar" if idx % 3 == 0 else "line" if idx % 3 == 1 else "pie"
-            ]
-            llm_summary = summarize_section_with_llm(
-                prompt,
-                category,
-                theme,
-                pack,
-                snippet_for_llm,
-                values=values,
-                labels=labels,
-                chart_title=chart_title,
+        return [
+            Section(
+                heading=pack.main_heading,
+                body=main_body,
+                diagram_html="",
+                chart_note="",
             )
-            combined_body = _clean_text(body + "\n" + llm_summary)
-            combined_body = _ensure_minimum_length(
-                combined_body,
-                min_chars=MIN_SECTION_CHARS,
-                padding_phrase=pack.padding_phrase,
-                theme=theme,
-                category=category,
-            )
-            chart_note = explain_chart_with_llm(
-                values,
-                labels,
-                theme,
-                pack,
-                chart_title=chart_title,
-            )
-
-            sections.append(
-                Section(
-                    heading=theme,
-                    body=combined_body,
-                    diagram_html=diagram,
-                    chart_note=chart_note,
-                )
-            )
-        return sections
+        ]
 
 
 def summarize_index_with_llm(
@@ -1180,7 +1197,13 @@ def build_article(
     category_snippet: str,
 ) -> str:
     with status_scope(f"build_article:{pack.code}"):
-        sections = generate_sections(prompt, category, pack, category_snippet=category_snippet)
+        sections = generate_sections(
+            prompt,
+            category,
+            pack,
+            category_snippet=category_snippet,
+            common_text=common_text,
+        )
         title = pack.title_template.format(category=category or "")
         outro = build_outro(common_text, pack)
         combined_index_text = "\n\n".join(
@@ -1194,6 +1217,22 @@ def build_article(
         )
         summary_section = _build_summary_section(
             summary=summary, outro=outro, pack=pack, category=category
+        )
+        main_body, summary_body = _enforce_total_char_limit(
+            sections[0].body,
+            summary_section.body,
+        )
+        sections[0] = Section(
+            heading=sections[0].heading,
+            body=main_body,
+            diagram_html=sections[0].diagram_html,
+            chart_note=sections[0].chart_note,
+        )
+        summary_section = Section(
+            heading=summary_section.heading,
+            body=summary_body,
+            diagram_html=summary_section.diagram_html,
+            chart_note=summary_section.chart_note,
         )
         persona_description = _build_persona_description(prompt, category, pack)
         persona_tags = _build_persona_tags(prompt, category, pack)
