@@ -52,6 +52,7 @@ class LanguagePack:
     intro: str
     themes: list[str]
     section_body_template: str
+    context_line: str
     chart_labels: dict[str, list[str]]
     chart_titles: dict[str, str]
     chart_captions: dict[str, str]
@@ -76,10 +77,13 @@ def get_language_packs() -> list[LanguagePack]:
             ],
             section_body_template=(
                 "哲学者気取りのヨハネの視点から、{category}領域に潜む課題を具体的に検証する。{theme}という切り口で、"
-                "世界のバグを見抜こうとする冷静さと、パンクな衝動が同居する。与えられたテーマ「{prompt}」"
-                "を軸に、欧州の地政学リスク、ドル覇権、分散型テクノロジーの進化を重ね合わせ、盲目的な熱狂ではなく"
-                "自分で考え抜くためのフレームを組み立てる。ヨハネが夜のカフェでチャートを眺めながら感じる虚無感を、"
-                "データ、ストーリー、リスク設計という3本柱で受け止め、同じ違和感を持つ読者に静かな伴走を提供する。"
+                "世界のバグを見抜こうとする冷静さと、パンクな衝動が同居する。{context}ヨハネが夜のカフェでチャートを"
+                "眺めながら感じる虚無感を、データ、ストーリー、リスク設計という3本柱で受け止め、同じ違和感を持つ"
+                "読者に静かな伴走を提供する。"
+            ),
+            context_line=(
+                "与えられたテーマを軸に、欧州の地政学リスク、ドル覇権、分散型テクノロジーの進化を重ね合わせ、"
+                "盲目的な熱狂ではなく自分で考え抜くためのフレームを組み立てる。"
             ),
             chart_labels={
                 "bar": ["技術", "市場", "文化"],
@@ -107,7 +111,7 @@ def get_language_packs() -> list[LanguagePack]:
             code="en",
             title_template="Dissecting the world's glitches through {category}",
             description="A bridge between reality and narrative for Yohane, balancing risk with quiet focus.",
-            intro="From Yohane's restless yet analytical gaze, this article deconstructs the client theme without blind hype.",
+            intro="From Yohane's restless yet analytical gaze, this article deconstructs the theme without blind hype.",
             themes=[
                 "Reading the distortions of markets and technology",
                 "Designing the balance of risk and return",
@@ -118,10 +122,13 @@ def get_language_packs() -> list[LanguagePack]:
             ],
             section_body_template=(
                 "From Yohane's perspective, this piece examines the hidden challenges in {category}. By focusing on {theme},"
-                " it holds together punk urgency and cold rationality. It layers European"
-                " geopolitics, dollar hegemony, and decentralized tech progress. The goal is a frame to think for yourself, not"
-                " to be swept away by hype. Late-night charts in a café, the unease of volatility, and the trio of data, story,"
-                " and risk design all converge to accompany readers who share the same dissonance."
+                " it holds together punk urgency and cold rationality. {context} Late-night charts in a café, the unease of"
+                " volatility, and the trio of data, story, and risk design all converge to accompany readers who share the"
+                " same dissonance."
+            ),
+            context_line=(
+                "It layers European geopolitics, dollar hegemony, and decentralized tech progress to offer a thinking frame"
+                " that resists blind hype."
             ),
             chart_labels={
                 "bar": ["Tech", "Markets", "Culture"],
@@ -149,7 +156,7 @@ def get_language_packs() -> list[LanguagePack]:
             code="it",
             title_template="Smontare i bug del mondo con {category}",
             description="Un ponte tra realtà e narrazione per Yohane, in equilibrio tra rischio e quiete.",
-            intro="Con lo sguardo inquieto ma analitico di Yohane, questo articolo smonta il tema del cliente senza farsi trascinare dall'hype.",
+            intro="Con lo sguardo inquieto ma analitico di Yohane, questo articolo smonta il tema senza farsi trascinare dall'hype.",
             themes=[
                 "Leggere le distorsioni di mercato e tecnologia",
                 "Progettare l'equilibrio tra rischio e ritorno",
@@ -160,10 +167,12 @@ def get_language_packs() -> list[LanguagePack]:
             ],
             section_body_template=(
                 "Dal punto di vista di Yohane, esploriamo le sfide nascoste in {category}. Con {theme} come lente,"
-                " convivono urgenza punk e razionalità fredda. Il tema del cliente '{prompt}' fa da perno per intrecciare"
-                " geopolitica europea, egemonia del dollaro e progresso delle tecnologie decentralizzate. L'obiettivo è"
-                " costruire un frame per pensare in autonomia, non inseguire l'entusiasmo cieco. I grafici notturni al caffè,"
-                " l'inquietudine della volatilità e il trio dati-narrazione-design del rischio guidano i lettori con la stessa dissonanza."
+                " convivono urgenza punk e razionalità fredda. {context} I grafici notturni al caffè, l'inquietudine della"
+                " volatilità e il trio dati-narrazione-design del rischio guidano i lettori con la stessa dissonanza."
+            ),
+            context_line=(
+                "Intreccia geopolitica europea, egemonia del dollaro e progresso delle tecnologie decentralizzate per"
+                " costruire un frame di pensiero autonomo lontano dall'entusiasmo cieco."
             ),
             chart_labels={
                 "bar": ["Tecnologia", "Mercati", "Cultura"],
@@ -431,9 +440,10 @@ def build_bar_chart(values: list[int], labels: list[str], *, title: str, caption
 </script>
 """
     return (
-        f"<figure aria-label='{html.escape(aria_label)}'>"
+        f"<figure aria-label='{html.escape(aria_label)}' style='text-align:center;'>"
         f"<figcaption>{html.escape(title)} — {html.escape(caption)}</figcaption>"
-        f"<canvas id='{canvas_id}' width='520' height='260' role='img' aria-label='{html.escape(title)}'></canvas>"
+        f"<canvas id='{canvas_id}' width='520' height='260' role='img' aria-label='{html.escape(title)}' "
+        f"style='display:block;margin:0 auto;'></canvas>"
         f"{script}</figure>"
     )
 
@@ -498,9 +508,10 @@ def build_line_chart(values: list[int], labels: list[str], *, title: str, captio
 </script>
 """
     return (
-        f"<figure aria-label='{html.escape(aria_label)}'>"
+        f"<figure aria-label='{html.escape(aria_label)}' style='text-align:center;'>"
         f"<figcaption>{html.escape(title)} — {html.escape(caption)}</figcaption>"
-        f"<canvas id='{canvas_id}' width='520' height='280' role='img' aria-label='{html.escape(title)}'></canvas>"
+        f"<canvas id='{canvas_id}' width='520' height='280' role='img' aria-label='{html.escape(title)}' "
+        f"style='display:block;margin:0 auto;'></canvas>"
         f"{script}</figure>"
     )
 
@@ -551,9 +562,10 @@ def build_pie_chart(values: list[int], labels: list[str], *, title: str, caption
 </script>
 """
     return (
-        f"<figure aria-label='{html.escape(aria_label)}'>"
+        f"<figure aria-label='{html.escape(aria_label)}' style='text-align:center;'>"
         f"<figcaption>{html.escape(title)} — {html.escape(caption)}</figcaption>"
-        f"<canvas id='{canvas_id}' width='320' height='240' role='img' aria-label='{html.escape(title)}'></canvas>"
+        f"<canvas id='{canvas_id}' width='320' height='240' role='img' aria-label='{html.escape(title)}' "
+        f"style='display:block;margin:0 auto;'></canvas>"
         f"{script}</figure>"
     )
 
@@ -590,9 +602,10 @@ def _fallback_section_summary(
     if pack.code == "ja":
         return textwrap.dedent(
             f"""
-            テーマ「{theme}」に沿って、{category}領域の論点「{prompt}」を再構成する。
+            テーマ「{theme}」に沿って、{category}領域の論点を再構成する。
             図「{chart_title}」のデータ（{formatted_values}）を手掛かりに、ヨハネは強弱の差からリスク配分を読み直す。
             参考スニペット: {snippet_hint or 'N/A'}。
+            {pack.context_line}
             パンクな疑いと静かな洞察を両立させ、見出し通りの論点に引き戻す。
             """
         ).strip()
@@ -600,18 +613,20 @@ def _fallback_section_summary(
     if pack.code == "it":
         return textwrap.dedent(
             f"""
-            Con il tema "{theme}" rilegge il prompt "{prompt}" nel contesto {category}.
+            Con il tema "{theme}" rilegge il quadro nel contesto {category}.
             I dati del grafico "{chart_title}" ({formatted_values}) mostrano dove l'attenzione e il rischio cambiano intensità.
             Estratto di riferimento: {snippet_hint or 'N/A'}.
-            Il tono resta sobrio e critico, così da rispettare titolo e diagramma.
+            {pack.context_line}
+            Il tono resta sobrio e critico, così da rispettare titolo e diagramma。
             """
         ).strip()
 
     return textwrap.dedent(
         f"""
-        Using the theme "{theme}", Yohane reframes the client idea "{prompt}" inside the {category} lens.
+        Using the theme "{theme}", Yohane reframes the core questions inside the {category} lens.
         The chart "{chart_title}" with values {formatted_values} anchors the section to the heading instead of repeating boilerplate.
         Reference snippet: {snippet_hint or 'N/A'}.
+        {pack.context_line}
         The stance stays analytical and skeptical while following what the title and diagram demand.
         """
     ).strip()
@@ -637,7 +652,7 @@ def summarize_section_with_llm(
             f"""
             見出し「{theme}」を3〜4文で要約してください。英訳・翻訳注記は不要です。
             カテゴリ: {category}
-            テーマ文: {prompt}
+            軸となる視点: {pack.context_line}
             参考スニペット抜粋:
             {category_snippet[:1200] or 'N/A'}
             図のタイトル: {chart_title}
@@ -654,7 +669,7 @@ def summarize_section_with_llm(
             Write 3-4 sentences in {pack.code} summarizing the theme for persona Yohane.
             Theme keyword: {theme}
             Chosen category: {category}
-            Prompt text: {prompt}
+            Core framing: {pack.context_line}
             Category reference (trimmed):
             {category_snippet[:1200] or 'N/A'}
             Chart title: {chart_title}
@@ -769,7 +784,9 @@ def generate_sections(
                 )
 
             body = textwrap.dedent(
-                pack.section_body_template.format(prompt=prompt, category=category, theme=theme)
+                pack.section_body_template.format(
+                    category=category, theme=theme, context=pack.context_line
+                )
             ).strip()
 
             chart_title = pack.chart_titles[
