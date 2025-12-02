@@ -98,8 +98,8 @@ def get_language_packs() -> list[LanguagePack]:
                 "与えられたテーマを軸に、欧州の地政学リスク、ドル覇権、分散型テクノロジーの進化を重ね合わせ、"
                 "盲目的な熱狂ではなく自分で考え抜くためのフレームを組み立てる。"
             ),
-            summary_heading="総論",
-            main_heading="メインセクション",
+            summary_heading="夜の余韻と着地",
+            main_heading="夜更けの分解ノート",
             chart_labels={
                 "bar": ["技術", "市場", "文化"],
                 "line": ["短期", "中期", "長期", "その先"],
@@ -145,8 +145,8 @@ def get_language_packs() -> list[LanguagePack]:
                 "It layers European geopolitics, dollar hegemony, and decentralized tech progress to offer a thinking frame"
                 " that resists blind hype."
             ),
-            summary_heading="Conclusion",
-            main_heading="Main section",
+            summary_heading="Late-night wrap",
+            main_heading="Midnight teardown",
             chart_labels={
                 "bar": ["Tech", "Markets", "Culture"],
                 "line": ["Short", "Mid", "Long", "Beyond"],
@@ -191,8 +191,8 @@ def get_language_packs() -> list[LanguagePack]:
                 "Intreccia geopolitica europea, egemonia del dollaro e progresso delle tecnologie decentralizzate per"
                 " costruire un frame di pensiero autonomo lontano dall'entusiasmo cieco."
             ),
-            summary_heading="Conclusione",
-            main_heading="Sezione principale",
+            summary_heading="Chiusura notturna",
+            main_heading="Smontaggio di mezzanotte",
             chart_labels={
                 "bar": ["Tecnologia", "Mercati", "Cultura"],
                 "line": ["Breve", "Medio", "Lungo", "Oltre"],
@@ -930,13 +930,14 @@ def _summarize_main_section(
     category: str,
     pack: LanguagePack,
     combined_snippet: str,
+    heading: str,
 ) -> str:
     target_chars = min(MAX_ARTICLE_CHARS - 200, MAIN_SECTION_TARGET_CHARS)
     if pack.code == "ja":
         system = "あなたは日本語で端的に執筆するブログライターです。"
         body = textwrap.dedent(
             f"""
-            クライアント指示を要約し、分類結果「{category}」に沿ったメインセクションを{target_chars}文字以内で作成してください。
+            クライアント指示を要約し、分類結果「{category}」に沿った見出し「{heading}」の本文を{target_chars}文字以内で作成してください。
             /indexes配下のスニペットと共有知識（Berkshire, bible, catholic, mybrain）を下に引用せず要約し、翻訳や英語併記は禁止。
             全体の口調は冷静で批判的、少しパンクに。重複や箇条書きは避け、連続した短い段落でまとめる。
             利用できる素材:
@@ -947,7 +948,7 @@ def _summarize_main_section(
         system = "Scrivi in italiano in modo conciso e coerente."
         body = textwrap.dedent(
             f"""
-            Riassumi le istruzioni del cliente e la categoria "{category}" in una sezione principale entro {target_chars} caratteri.
+            Riassumi le istruzioni del cliente e la categoria "{category}" nella sezione "{heading}" entro {target_chars} caratteri.
             Usa gli appunti estratti da /indexes e dalle fonti Berkshire, bible, catholic, mybrain come contesto, senza citazioni dirette.
             Tono calmo, critico e leggermente punk; niente punti elenco, niente ripetizioni.
             Testo di riferimento:
@@ -958,7 +959,7 @@ def _summarize_main_section(
         system = "Write a compact English main section with analytical calm."
         body = textwrap.dedent(
             f"""
-            Summarize the client brief under the category "{category}" in under {target_chars} characters.
+            Summarize the client brief under the category "{category}" as the section "{heading}" in under {target_chars} characters.
             Use the extracted /indexes notes plus Berkshire, bible, catholic, and mybrain context; do not quote directly.
             Keep a critical, quietly punk tone without bullet points or repetition.
             Reference material:
@@ -986,27 +987,34 @@ def _enforce_total_char_limit(main_body: str, summary_body: str) -> tuple[str, s
 
 
 def generate_sections(
-    prompt: str, category: str, pack: LanguagePack, *, category_snippet: str, common_text: str
+    prompt: str,
+    category: str,
+    pack: LanguagePack,
+    *,
+    category_snippet: str,
+    common_text: str,
+    main_heading: str,
+    combined_snippet: str,
 ) -> list[Section]:
     with status_scope(f"generate_sections:{pack.code}"):
-        combined_snippet = _clean_text("\n\n".join(filter(None, [category_snippet, common_text])))
         main_body = _summarize_main_section(
             prompt=prompt,
             category=category,
             pack=pack,
             combined_snippet=combined_snippet,
+            heading=main_heading,
         )
         main_body = _ensure_minimum_length(
             main_body,
             min_chars=MIN_SECTION_CHARS,
             padding_phrase=pack.padding_phrase,
-            theme=pack.main_heading,
+            theme=main_heading,
             category=category,
         )
 
         return [
             Section(
-                heading=pack.main_heading,
+                heading=main_heading,
                 body=main_body,
                 diagram_html="",
                 chart_note="",
@@ -1064,7 +1072,7 @@ def build_outro(common_text: str, pack: LanguagePack) -> str:
 
 
 def _build_summary_section(
-    *, summary: str, outro: str, pack: LanguagePack, category: str
+    *, summary: str, outro: str, pack: LanguagePack, category: str, heading: str
 ) -> Section:
     combined = "\n".join(part for part in (summary, outro) if part)
     combined = _clean_text(combined)
@@ -1072,11 +1080,11 @@ def _build_summary_section(
         combined,
         min_chars=MIN_SECTION_CHARS,
         padding_phrase=pack.padding_phrase,
-        theme=pack.summary_heading,
+        theme=heading,
         category=category,
     )
     return Section(
-        heading=pack.summary_heading,
+        heading=heading,
         body=extended_outro,
         diagram_html="",
         chart_note="",
@@ -1134,6 +1142,70 @@ def _build_persona_tags(prompt: str, category: str, pack: LanguagePack) -> str:
 
     tags = big + normal + small
     return " ".join(_sanitize_tag(tag) for tag in tags)
+
+
+def _generate_section_heading(
+    *,
+    kind: str,
+    prompt: str,
+    category: str,
+    pack: LanguagePack,
+    index_text: str,
+) -> str:
+    """Craft a persona-aware heading from index context without generic labels."""
+
+    snippet = _clean_text(index_text)[:360]
+    if pack.code == "ja":
+        system = "15文字前後の日本語見出しを作る編集者です。"
+        body = textwrap.dedent(
+            f"""
+            ペルソナ「哲学者気取りのヨハネ」に刺さる{('本論の見出し' if kind == 'main' else '締めの見出し')}を1つだけ返してください。
+            テーマ: {prompt}
+            カテゴリ: {category}
+            参考になるインデックス抜粋（日本語または英語）:
+            {snippet or 'N/A'}
+            禁止語: メインセクション, 総論, Conclusion, Main section, Main Section, Main Section
+            余計な記号や引用符は不要です。
+            """
+        )
+    elif pack.code == "it":
+        system = "Sei un editor che crea titoli brevi e incisivi."
+        body = textwrap.dedent(
+            f"""
+            Crea un titolo di circa 15 caratteri per la {('sezione centrale' if kind == 'main' else 'conclusione')} che colpisca il persona "Yohane".
+            Tema: {prompt}
+            Categoria: {category}
+            Spunti (italiano/inglese) presi dall'indice:
+            {snippet or 'N/A'}
+            Evita parole generiche come Main section o Conclusion; niente virgolette.
+            """
+        )
+    else:
+        system = "You write compact, persona-aware headings."
+        body = textwrap.dedent(
+            f"""
+            Propose a single heading (~15 characters) for the {('core section' if kind == 'main' else 'wrap-up')} that resonates with persona "Yohane".
+            Theme: {prompt}
+            Category: {category}
+            Index clues (EN/JA):
+            {snippet or 'N/A'}
+            Avoid generic labels like Main section or Conclusion and drop quotes.
+            """
+        )
+
+    heading = _post_llm(SECTION_MODEL, body, system=system)
+    if _is_llm_error(heading):
+        fallback = (
+            f"{pack.main_heading} — {category}"
+            if kind == "main"
+            else f"{pack.summary_heading}（{category}）"
+        )
+        return _shorten_phrase(fallback, limit=22)
+
+    cleaned = _clean_text(heading).splitlines()[0]
+    cleaned = re.sub(r'^["\'\s]+|["\'\s]+$', "", cleaned)
+    cleaned = re.sub(r"(?i)main section|conclusion|総論|メインセクション", "", cleaned)
+    return _shorten_phrase(cleaned or pack.main_heading, limit=22)
 
 
 def compose_html(
@@ -1197,18 +1269,34 @@ def build_article(
     category_snippet: str,
 ) -> str:
     with status_scope(f"build_article:{pack.code}"):
+        combined_index_text = _clean_text(
+            "\n\n".join(part for part in (category_snippet, common_text) if part)
+        )
+        main_heading = _generate_section_heading(
+            kind="main",
+            prompt=prompt,
+            category=category,
+            pack=pack,
+            index_text=combined_index_text,
+        )
+        summary_heading = _generate_section_heading(
+            kind="summary",
+            prompt=prompt,
+            category=category,
+            pack=pack,
+            index_text=combined_index_text,
+        )
         sections = generate_sections(
             prompt,
             category,
             pack,
             category_snippet=category_snippet,
             common_text=common_text,
+            main_heading=main_heading,
+            combined_snippet=combined_index_text,
         )
         title = pack.title_template.format(category=category or "")
         outro = build_outro(common_text, pack)
-        combined_index_text = "\n\n".join(
-            part for part in (category_snippet, common_text) if part
-        )
         summary = summarize_index_with_llm(
             prompt=prompt,
             category=category,
@@ -1216,7 +1304,11 @@ def build_article(
             index_text=combined_index_text,
         )
         summary_section = _build_summary_section(
-            summary=summary, outro=outro, pack=pack, category=category
+            summary=summary,
+            outro=outro,
+            pack=pack,
+            category=category,
+            heading=summary_heading,
         )
         main_body, summary_body = _enforce_total_char_limit(
             sections[0].body,
