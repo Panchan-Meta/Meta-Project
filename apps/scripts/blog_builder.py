@@ -29,7 +29,7 @@ INDEX_DIR = BASE_DIR / "indexes"
 DEFAULT_OUTPUT_DIR = Path("/mnt/hgfs/output")
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate")
 LLM_TIMEOUT = int(os.environ.get("LLM_TIMEOUT", "120"))
-MIN_SECTION_CHARS = int(os.environ.get("MIN_SECTION_CHARS", "1100"))
+MIN_SECTION_CHARS = int(os.environ.get("MIN_SECTION_CHARS", "1000"))
 LLM_MAX_TOKENS = int(os.environ.get("LLM_MAX_TOKENS", "900"))
 SECTION_MODEL = os.environ.get("BLOG_BUILDER_SECTION_MODEL", "phi3:mini")
 CLASSIFIER_MODEL = os.environ.get("BLOG_BUILDER_CLASSIFIER_MODEL", "phi3:mini")
@@ -421,6 +421,10 @@ def build_bar_chart(values: list[int], labels: list[str], *, title: str, caption
   const ctx = canvas.getContext('2d');
   const values = {data_json};
   const labels = {labels_json};
+  const clampLabel = (text) => {{
+    const normalized = String(text ?? '');
+    return normalized.length > 12 ? normalized.slice(0, 12) + '…' : normalized;
+  }};
   const width = canvas.width;
   const height = canvas.height;
   const padding = 40;
@@ -451,7 +455,7 @@ def build_bar_chart(values: list[int], labels: list[str], *, title: str, caption
     ctx.fillStyle = '#e4e4ef';
     ctx.font = '12px sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText(labels[idx] || '', x + barWidth * 0.35, height - padding + 16);
+    ctx.fillText(clampLabel(labels[idx]), x + barWidth * 0.35, height - padding + 16);
   }});
 }})();
 </script>
@@ -477,6 +481,10 @@ def build_line_chart(values: list[int], labels: list[str], *, title: str, captio
   const ctx = canvas.getContext('2d');
   const values = {data_json};
   const labels = {labels_json};
+  const clampLabel = (text) => {{
+    const normalized = String(text ?? '');
+    return normalized.length > 12 ? normalized.slice(0, 12) + '…' : normalized;
+  }};
   const width = canvas.width;
   const height = canvas.height;
   const padding = 40;
@@ -518,7 +526,7 @@ def build_line_chart(values: list[int], labels: list[str], *, title: str, captio
     ctx.fillStyle = '#e4e4ef';
     ctx.font = '12px sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText(labels[idx] || '', x, height - padding + 16);
+    ctx.fillText(clampLabel(labels[idx]), x, height - padding + 16);
     ctx.fillStyle = '#ff8906';
   }});
 }})();
@@ -545,6 +553,10 @@ def build_pie_chart(values: list[int], labels: list[str], *, title: str, caption
   const ctx = canvas.getContext('2d');
   const values = {data_json};
   const labels = {labels_json};
+  const clampLabel = (text) => {{
+    const normalized = String(text ?? '');
+    return normalized.length > 12 ? normalized.slice(0, 12) + '…' : normalized;
+  }};
   const total = values.reduce((sum, v) => sum + v, 0) || 1;
   const radius = Math.min(canvas.width, canvas.height) / 2 - 10;
   const cx = canvas.width / 2;
@@ -572,7 +584,7 @@ def build_pie_chart(values: list[int], labels: list[str], *, title: str, caption
     ctx.fillStyle = '#e4e4ef';
     ctx.font = '12px sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText(labels[idx] || '', lx, ly);
+    ctx.fillText(clampLabel(labels[idx]), lx, ly);
     start = end;
   }});
 }})();
@@ -694,8 +706,8 @@ def summarize_section_with_llm(
         )
         body = textwrap.dedent(
             f"""
-            見出し「{theme}」に対して、{MIN_SECTION_CHARS}文字以上の長文を作成してください。
-            {category}の現場感とヨハネの個人的な体験をつなぎ、パラグラフごとに角度を変えて深掘りします。
+            見出し「{theme}」に対して、約1000文字で、かつ{MIN_SECTION_CHARS}文字以上の長文を作成してください。
+            {category}の現場感とヨハネの個人的な体験をつなぎ、パラグラフごとに角度を変えて深掘りします。同じ主張や表現を繰り返さず、段落ごとに新しい視点や具体例を加えること。
             期待する構造:
             - 冒頭: 見出しで提示した違和感や問いを、ヨハネの視点で鮮やかに描写する。
             - 中盤: {pack.context_line} を踏まえ、事例・数字・倫理的なひっかかりを具体的に展開する。
@@ -931,7 +943,10 @@ def _shorten_phrase(text: str, *, limit: int = 28) -> str:
 def _sanitize_tag(label: str) -> str:
     cleaned = re.sub(r"[#]+", "", label)
     cleaned = re.sub(r"\s+", "-", cleaned.strip())
-    return f"#{cleaned}"
+    limited = cleaned[:15]
+    if not limited:
+        limited = "tag"
+    return f"#{limited}"
 
 
 def _build_persona_description(prompt: str, category: str, pack: LanguagePack) -> str:
