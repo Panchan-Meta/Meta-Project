@@ -29,6 +29,7 @@ INDEX_DIR = BASE_DIR / "indexes"
 DEFAULT_OUTPUT_DIR = Path("/mnt/hgfs/output")
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate")
 LLM_TIMEOUT = 900
+MIN_SECTION_CHARS = 3000
 SCRIPT_CATEGORY_FILES = [
     "Web3",
     "NFT",
@@ -586,6 +587,33 @@ def _is_llm_error(text: str | None) -> bool:
     return not text or text.startswith("[LLM error")
 
 
+def _format_text_block(text: str) -> str:
+    escaped = html.escape(text)
+    return escaped.replace("\n", "<br />\n")
+
+
+def _ensure_minimum_length(
+    text: str, *, min_chars: int, padding_phrase: str, theme: str, category: str
+) -> str:
+    if len(text) >= min_chars:
+        return text
+
+    padding_lines = [
+        f"{padding_phrase} 見出し『{theme}』を起点に、{category}の現場で揺れる感情や数字を掘り下げる。",
+        f"ヨハネが夜のカフェでノートに書き殴る独白として、{theme}の違和感と実装プランを往復させる。",
+        f"パンクな疑いと静かな祈りを両立させながら、{category}をめぐる地政学・技術・倫理を丁寧に編み直す。",
+        f"{theme}という言葉が刺さる理由を、友人に語りかけるようなリズムで具体化し、読者の体験に重ねる。",
+        f"数字の裏側にある失敗談や小さな成功例を織り込み、{category}の未来を自分ごととして描き直す。",
+    ]
+
+    idx = 0
+    while len(text) < min_chars:
+        padding = padding_lines[idx % len(padding_lines)]
+        text = f"{text}\n{padding}"
+        idx += 1
+    return text
+
+
 def _fallback_section_summary(
     *,
     prompt: str,
@@ -650,37 +678,39 @@ def summarize_section_with_llm(
         )
         body = textwrap.dedent(
             f"""
-            見出し「{theme}」を3〜4文で要約してください。英訳・翻訳注記は不要です。
-            カテゴリ: {category}
-            軸となる視点: {pack.context_line}
+            見出し「{theme}」に対して、{MIN_SECTION_CHARS}文字以上の長文を作成してください。
+            {category}の現場感とヨハネの個人的な体験をつなぎ、パラグラフごとに角度を変えて深掘りします。
+            期待する構造:
+            - 冒頭: 見出しで提示した違和感や問いを、ヨハネの視点で鮮やかに描写する。
+            - 中盤: {pack.context_line} を踏まえ、事例・数字・倫理的なひっかかりを具体的に展開する。
+            - 後半: 図「{chart_title}」のラベル{labels}と値{values}を手がかりに、リスク設計や意思決定のニュアンスを掘る。
+            - 締め: 読者に向けて静かな伴走を示す。
             参考スニペット抜粋:
             {category_snippet[:1200] or 'N/A'}
-            図のタイトル: {chart_title}
-            ラベルと値: {list(zip(labels, values))}
-            語調: 冷静で批判的、かすかなパンクさを含める。
+            語調: 冷静で批判的、かすかなパンクさを含める。英訳・翻訳注記は禁止。
             """
         )
     else:
-        system = (
-            "You are a structured blog assistant. Keep the language aligned to the user locale."
-        )
+        system = "You are a structured blog assistant. Keep the language aligned to the user locale."
         body = textwrap.dedent(
             f"""
-            Write 3-4 sentences in {pack.code} summarizing the theme for persona Yohane.
+            Write a long-form section in {pack.code} with at least {MIN_SECTION_CHARS} characters for persona Yohane.
             Theme keyword: {theme}
             Chosen category: {category}
-            Core framing: {pack.context_line}
+            Desired structure:
+            - Opening: a vivid hook that ties Yohane's personal tension to the heading.
+            - Middle: weave {pack.context_line} with concrete stories, data points, and ethical friction.
+            - Later: interpret the chart '{chart_title}' using labels {labels} and values {values} to shape risk/return nuance.
+            - Closing: offer a quiet companion message to readers.
             Category reference (trimmed):
             {category_snippet[:1200] or 'N/A'}
-            Chart title: {chart_title}
-            Chart labels and values: {list(zip(labels, values))}
-            Keep it analytical, skeptical, and reflective.
+            Keep it analytical, skeptical, reflective, and avoid repetitive boilerplate.
             """
         )
 
     llm_text = _post_llm("llama3:8b", body, system=system)
     if _is_llm_error(llm_text):
-        return _fallback_section_summary(
+        llm_text = _fallback_section_summary(
             prompt=prompt,
             category=category,
             theme=theme,
@@ -690,7 +720,14 @@ def summarize_section_with_llm(
             category_snippet=category_snippet,
             chart_title=chart_title,
         )
-    return llm_text
+
+    return _ensure_minimum_length(
+        llm_text,
+        min_chars=MIN_SECTION_CHARS,
+        padding_phrase=pack.padding_phrase,
+        theme=theme,
+        category=category,
+    )
 
 
 def explain_chart_with_llm(
@@ -707,7 +744,7 @@ def explain_chart_with_llm(
         )
         prompt_body = textwrap.dedent(
             f"""
-            以下の擬似データを持つ図を2文で解説してください。英訳・翻訳の併記は禁止です。
+            以下の擬似データを持つ図を2〜3文で解説し、文と文の間に改行を入れてください。英訳・翻訳の併記は禁止です。
             テーマ: {theme}
             図のタイトル: {chart_title}
             ラベルと値: {list(zip(labels, values))}
@@ -718,7 +755,7 @@ def explain_chart_with_llm(
         system = "Provide concise chart commentary matching the locale."
         prompt_body = textwrap.dedent(
             f"""
-            Summarize the following synthetic chart insightfully in {pack.code}. Keep it to 2 sentences.
+            Summarize the following synthetic chart insightfully in {pack.code}. Provide 2-3 sentences separated by line breaks.
             Theme: {theme}
             Chart title: {chart_title}
             Labels and values: {list(zip(labels, values))}
@@ -729,17 +766,17 @@ def explain_chart_with_llm(
     if _is_llm_error(llm_text):
         if pack.code == "ja":
             return (
-                f"図「{chart_title}」は{theme}の文脈で、{', '.join(labels)}のバランスを値{values}として示す。"
-                " 極端な値の差を冷静に読み取り、見出しの問いに沿って解釈する。"
+                f"図「{chart_title}」は{theme}の文脈で、{', '.join(labels)}のバランスを値{values}として示す。\n"
+                "極端な値の差を冷静に読み取り、見出しの問いに沿って解釈する。"
             )
         if pack.code == "it":
             return (
-                f"Il grafico '{chart_title}' per '{theme}' mette a confronto {', '.join(labels)} con valori {values}."
-                " Le differenze evidenziano dove attenzione e rischio vanno calibrati."
+                f"Il grafico '{chart_title}' per '{theme}' mette a confronto {', '.join(labels)} con valori {values}.\n"
+                "Le differenze evidenziano dove attenzione e rischio vanno calibrati."
             )
         return (
-            f"The chart '{chart_title}' ties the theme '{theme}' to the {labels} weights {values},"
-            " highlighting where Yohane would lean in or step back."
+            f"The chart '{chart_title}' ties the theme '{theme}' to the {labels} weights {values}.\n"
+            "It highlights where Yohane would lean in or step back while calibrating risk."
         )
     return llm_text
 
@@ -802,12 +839,26 @@ def generate_sections(
                 labels=labels,
                 chart_title=chart_title,
             )
-            chart_note = ""
+            combined_body = body + "\n" + llm_summary
+            combined_body = _ensure_minimum_length(
+                combined_body,
+                min_chars=MIN_SECTION_CHARS,
+                padding_phrase=pack.padding_phrase,
+                theme=theme,
+                category=category,
+            )
+            chart_note = explain_chart_with_llm(
+                values,
+                labels,
+                theme,
+                pack,
+                chart_title=chart_title,
+            )
 
             sections.append(
                 Section(
                     heading=theme,
-                    body=body + "\n" + llm_summary,
+                    body=combined_body,
                     diagram_html=diagram,
                     chart_note=chart_note,
                 )
@@ -825,16 +876,16 @@ def build_outro(common_text: str, pack: LanguagePack) -> str:
 def compose_html(title: str, description: str, intro: str, sections: list[Section], outro: str, *, padding_phrase: str) -> str:
     body_parts = [
         f"<h1>{html.escape(title)}</h1>",
-        f"<p class='description'>{html.escape(description)}</p>",
-        f"<p class='intro'>{html.escape(intro)}</p>",
+        f"<p class='description'>{_format_text_block(description)}</p>",
+        f"<p class='intro'>{_format_text_block(intro)}</p>",
     ]
     for section in sections:
         body_parts.append(f"<h2>{html.escape(section.heading)}</h2>")
-        body_parts.append(f"<p>{html.escape(section.body)}</p>")
+        body_parts.append(f"<p>{_format_text_block(section.body)}</p>")
         body_parts.append(section.diagram_html)
         if section.chart_note.strip():
-            body_parts.append(f"<p class='chart-note'>{html.escape(section.chart_note)}</p>")
-    body_parts.append(f"<h2>Outro</h2><p>{html.escape(outro)}</p>")
+            body_parts.append(f"<p class='chart-note'>{_format_text_block(section.chart_note)}</p>")
+    body_parts.append(f"<h2>Outro</h2><p>{_format_text_block(outro)}</p>")
 
     html_doc = "\n".join(body_parts)
     return "<article>" + html_doc + "</article>"
