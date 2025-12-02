@@ -29,7 +29,7 @@ INDEX_DIR = BASE_DIR / "indexes"
 DEFAULT_OUTPUT_DIR = Path("/mnt/hgfs/output")
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate")
 LLM_TIMEOUT = int(os.environ.get("LLM_TIMEOUT", "120"))
-MIN_SECTION_CHARS = int(os.environ.get("MIN_SECTION_CHARS", "1000"))
+MIN_SECTION_CHARS = int(os.environ.get("MIN_SECTION_CHARS", "750"))
 LLM_MAX_TOKENS = int(os.environ.get("LLM_MAX_TOKENS", "900"))
 SECTION_MODEL = os.environ.get("BLOG_BUILDER_SECTION_MODEL", "phi3:mini")
 CLASSIFIER_MODEL = os.environ.get("BLOG_BUILDER_CLASSIFIER_MODEL", "phi3:mini")
@@ -698,13 +698,11 @@ def _fallback_section_summary(
     chart_title: str,
 ) -> str:
     formatted_values = ", ".join(f"{label}:{value}" for label, value in zip(labels, values))
-    snippet_hint = category_snippet[:60] + ("…" if len(category_snippet) > 60 else "")
     if pack.code == "ja":
         return textwrap.dedent(
             f"""
             テーマ「{theme}」に沿って、{category}領域の論点を再構成する。
             図「{chart_title}」のデータ（{formatted_values}）を手掛かりに、ヨハネは強弱の差からリスク配分を読み直す。
-            参考スニペット: {snippet_hint or 'N/A'}。
             {pack.context_line}
             パンクな疑いと静かな洞察を両立させ、見出し通りの論点に引き戻す。
             """
@@ -715,7 +713,6 @@ def _fallback_section_summary(
             f"""
             Con il tema "{theme}" rilegge il quadro nel contesto {category}.
             I dati del grafico "{chart_title}" ({formatted_values}) mostrano dove l'attenzione e il rischio cambiano intensità.
-            Estratto di riferimento: {snippet_hint or 'N/A'}.
             {pack.context_line}
             Il tono resta sobrio e critico, così da rispettare titolo e diagramma。
             """
@@ -750,23 +747,23 @@ def summarize_section_with_llm(
         )
         body = textwrap.dedent(
             f"""
-            見出し「{theme}」に対して、約1000文字で、かつ{MIN_SECTION_CHARS}文字以上の長文を作成してください。
+            見出し「{theme}」に対して、約750文字で、かつ{MIN_SECTION_CHARS}文字以上の長文を作成してください。
             {category}の現場感とヨハネの個人的な体験をつなぎ、パラグラフごとに角度を変えて深掘りします。同じ主張や表現を繰り返さず、段落ごとに新しい視点や具体例を加えること。
             期待する構造:
             - 冒頭: 見出しで提示した違和感や問いを、ヨハネの視点で鮮やかに描写する。
             - 中盤: {pack.context_line} を踏まえ、事例・数字・倫理的なひっかかりを具体的に展開する。
             - 後半: 図「{chart_title}」のラベル{labels}と値{values}を手がかりに、リスク設計や意思決定のニュアンスを掘る。
             - 締め: 読者に向けて静かな伴走を示す。
-            参考スニペット抜粋:
+            参考スニペット（引用や宣伝は禁止。本文には書かない）:
             {category_snippet[:1200] or 'N/A'}
-            語調: 冷静で批判的、かすかなパンクさを含める。英訳・翻訳注記は禁止。
+            語調: 冷静で批判的、かすかなパンクさを含める。英訳・翻訳注記は禁止。インデックスの内容を抜粋したと明示する記述は避ける。
             """
         )
     else:
         system = "You are a structured blog assistant. Keep the language aligned to the user locale."
         body = textwrap.dedent(
             f"""
-            Write a long-form section in {pack.code} with at least {MIN_SECTION_CHARS} characters for persona Yohane.
+            Write a long-form section in {pack.code} with roughly 750 characters (at least {MIN_SECTION_CHARS}) for persona Yohane.
             Theme keyword: {theme}
             Chosen category: {category}
             Desired structure:
@@ -774,9 +771,9 @@ def summarize_section_with_llm(
             - Middle: weave {pack.context_line} with concrete stories, data points, and ethical friction.
             - Later: interpret the chart '{chart_title}' using labels {labels} and values {values} to shape risk/return nuance.
             - Closing: offer a quiet companion message to readers.
-            Category reference (trimmed):
+            Context from the index (do NOT quote or promote it in the text; use it silently):
             {category_snippet[:1200] or 'N/A'}
-            Keep it analytical, skeptical, reflective, and avoid repetitive boilerplate.
+            Keep it analytical, skeptical, reflective, and avoid repetitive boilerplate or citation-like phrasing.
             """
         )
 
@@ -1043,6 +1040,7 @@ def compose_html(
     padding_phrase: str,
     persona_description: str,
     persona_tags: str,
+    lang_code: str,
 ) -> str:
     body_parts = [
         f"<h1>{html.escape(title)}</h1>",
@@ -1065,15 +1063,23 @@ def compose_html(
     body_parts.append(f"<p class='persona-tags'>{html.escape(persona_tags)}</p>")
     body_parts.append("</section>")
 
-    body_parts.append("<section class='persona-meta'>")
-    body_parts.append("<h3>Description</h3>")
-    body_parts.append(f"<p class='persona-description'>{_format_text_block(persona_description)}</p>")
-    body_parts.append("<h3>Tags</h3>")
-    body_parts.append(f"<p class='persona-tags'>{html.escape(persona_tags)}</p>")
-    body_parts.append("</section>")
-
     html_doc = "\n".join(body_parts)
-    return "<article>" + html_doc + "</article>"
+    return textwrap.dedent(
+        f"""
+        <!DOCTYPE html>
+        <html lang="{html.escape(lang_code)}">
+        <head>
+            <meta charset="UTF-8" />
+            <title>{html.escape(title)}</title>
+        </head>
+        <body>
+        <article>
+        {html_doc}
+        </article>
+        </body>
+        </html>
+        """
+    ).strip()
 
 
 def build_article(
@@ -1100,6 +1106,7 @@ def build_article(
             padding_phrase=pack.padding_phrase,
             persona_description=persona_description,
             persona_tags=persona_tags,
+            lang_code=pack.code,
         )
 
 
