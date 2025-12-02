@@ -340,7 +340,7 @@ def read_snippet(path_candidates: Iterable[Path]) -> str:
             except OSError:
                 continue
 
-    return "\n\n".join(snippets)
+    return _clean_text("\n\n".join(snippets))
 
 
 def collect_section_snippet(index_dir: Path, theme: str, *, limit: int = 3) -> str:
@@ -659,6 +659,46 @@ def _is_llm_error(text: str | None) -> bool:
     return not text or text.startswith("[LLM error")
 
 
+def _clean_text(text: str) -> str:
+    """Remove garbled characters and collapse duplicate lines/sentences.
+
+    The source knowledge files occasionally include replacement characters
+    (e.g., ``�``) and repeated paragraphs. Cleaning them before and after LLM
+    calls reduces visible artifacts in the rendered sections.
+    """
+
+    if not text:
+        return ""
+
+    # Strip common replacement characters or byte-order marks.
+    cleaned = text.replace("\ufffd", "").replace("\ufeff", "")
+    cleaned = re.sub(r"�+", "", cleaned)
+
+    # Deduplicate consecutive sentences within a paragraph.
+    paragraphs = [para.strip() for para in cleaned.split("\n")]
+    normalized_paragraphs: list[str] = []
+    for para in paragraphs:
+        if not para:
+            continue
+        sentences = re.split(r"(?<=[。.!?])\s+", para)
+        deduped: list[str] = []
+        for sentence in sentences:
+            stripped = sentence.strip()
+            if not stripped:
+                continue
+            if deduped and stripped == deduped[-1]:
+                continue
+            deduped.append(stripped)
+        normalized = " ".join(deduped)
+        if normalized_paragraphs and normalized == normalized_paragraphs[-1]:
+            continue
+        normalized_paragraphs.append(normalized)
+
+    collapsed = "\n".join(normalized_paragraphs)
+    collapsed = re.sub(r"\n{3,}", "\n\n", collapsed)
+    return collapsed.strip()
+
+
 def _format_text_block(text: str) -> str:
     escaped = html.escape(text)
     return escaped.replace("\n", "<br />\n")
@@ -697,6 +737,7 @@ def _fallback_section_summary(
     category_snippet: str,
     chart_title: str,
 ) -> str:
+    snippet_hint = _clean_text(category_snippet[:200])
     formatted_values = ", ".join(f"{label}:{value}" for label, value in zip(labels, values))
     if pack.code == "ja":
         return textwrap.dedent(
@@ -790,8 +831,10 @@ def summarize_section_with_llm(
             chart_title=chart_title,
         )
 
+    cleaned = _clean_text(llm_text)
+
     return _ensure_minimum_length(
-        llm_text,
+        cleaned,
         min_chars=MIN_SECTION_CHARS,
         padding_phrase=pack.padding_phrase,
         theme=theme,
@@ -863,7 +906,7 @@ def explain_chart_with_llm(
             f"The chart '{chart_title}' ties the theme '{theme}' to the {labels} weights {values}.\n"
             "It highlights where Yohane would lean in or step back while calibrating risk."
         )
-    return llm_text
+    return _clean_text(llm_text)
 
 
 def generate_sections(
@@ -927,7 +970,7 @@ def generate_sections(
                 labels=labels,
                 chart_title=chart_title,
             )
-            combined_body = body + "\n" + llm_summary
+            combined_body = _clean_text(body + "\n" + llm_summary)
             combined_body = _ensure_minimum_length(
                 combined_body,
                 min_chars=MIN_SECTION_CHARS,
@@ -954,6 +997,48 @@ def generate_sections(
         return sections
 
 
+def summarize_index_with_llm(
+    *,
+    prompt: str,
+    category: str,
+    pack: LanguagePack,
+    index_text: str,
+) -> str:
+    cleaned_index = _clean_text(index_text)
+    if not cleaned_index:
+        return ""
+
+    snippet = cleaned_index[:1600]
+    if pack.code == "ja":
+        system = (
+            "あなたは日本語で批判的かつ端的に要約するアシスタントです。出力は日本語のみ。"
+        )
+        body = textwrap.dedent(
+            f"""
+            以下のインデックス知識を踏まえ、テーマ「{prompt}」とカテゴリ「{category}」に沿った総論を3〜4文でまとめてください。
+            同じ文章を繰り返さず、文字化けに見える記号は使わないこと。引用文や宣伝調は禁止。
+            参照テキスト:
+            {snippet}
+            """
+        )
+    else:
+        system = "Provide a concise, non-repetitive summary in the user's locale."
+        body = textwrap.dedent(
+            f"""
+            Using the index notes below, craft a brief conclusion for category "{category}" and prompt "{prompt}".
+            Keep it 3-4 sentences, avoid repeated lines or garbled characters, and maintain an analytical, calm tone.
+            Source notes:
+            {snippet}
+            """
+        )
+
+    llm_text = _post_llm(SECTION_MODEL, body, system=system)
+    if _is_llm_error(llm_text):
+        return _clean_text(textwrap.shorten(cleaned_index, width=500, placeholder="…"))
+
+    return _clean_text(llm_text)
+
+
 def build_outro(common_text: str, pack: LanguagePack) -> str:
     outro_parts = list(pack.outro_lines)
     if common_text:
@@ -961,9 +1046,13 @@ def build_outro(common_text: str, pack: LanguagePack) -> str:
     return "\n".join(outro_parts)
 
 
-def _build_summary_section(outro: str, pack: LanguagePack, *, category: str) -> Section:
+def _build_summary_section(
+    *, summary: str, outro: str, pack: LanguagePack, category: str
+) -> Section:
+    combined = "\n".join(part for part in (summary, outro) if part)
+    combined = _clean_text(combined)
     extended_outro = _ensure_minimum_length(
-        outro,
+        combined,
         min_chars=MIN_SECTION_CHARS,
         padding_phrase=pack.padding_phrase,
         theme=pack.summary_heading,
@@ -1094,7 +1183,18 @@ def build_article(
         sections = generate_sections(prompt, category, pack, category_snippet=category_snippet)
         title = pack.title_template.format(category=category or "")
         outro = build_outro(common_text, pack)
-        summary_section = _build_summary_section(outro, pack, category=category)
+        combined_index_text = "\n\n".join(
+            part for part in (category_snippet, common_text) if part
+        )
+        summary = summarize_index_with_llm(
+            prompt=prompt,
+            category=category,
+            pack=pack,
+            index_text=combined_index_text,
+        )
+        summary_section = _build_summary_section(
+            summary=summary, outro=outro, pack=pack, category=category
+        )
         persona_description = _build_persona_description(prompt, category, pack)
         persona_tags = _build_persona_tags(prompt, category, pack)
         return compose_html(
