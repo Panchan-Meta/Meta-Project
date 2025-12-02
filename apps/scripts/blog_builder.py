@@ -1003,6 +1003,13 @@ def compose_html(
     body_parts.append(f"<p class='persona-tags'>{html.escape(persona_tags)}</p>")
     body_parts.append("</section>")
 
+    body_parts.append("<section class='persona-meta'>")
+    body_parts.append("<h3>Description</h3>")
+    body_parts.append(f"<p class='persona-description'>{_format_text_block(persona_description)}</p>")
+    body_parts.append("<h3>Tags</h3>")
+    body_parts.append(f"<p class='persona-tags'>{html.escape(persona_tags)}</p>")
+    body_parts.append("</section>")
+
     html_doc = "\n".join(body_parts)
     return "<article>" + html_doc + "</article>"
 
