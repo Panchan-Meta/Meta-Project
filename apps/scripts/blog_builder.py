@@ -63,7 +63,8 @@ DEFAULT_SCRIPT_CATEGORIES = [
 COMMON_FILES = ["mybrain", "catholic", "bible", "berkshire"]
 
 
-def persona_name(pack: LanguagePack) -> str:
+def persona_name(pack: "LanguagePack") -> str:
+    # ヨハネは英語では John にする
     return "John" if pack.code == "en" else "Yohane"
 
 
@@ -328,38 +329,61 @@ def warm_model(model: str) -> None:
         _post_llm(model, prompt="warmup ping", track_call=False)
 
 
+# === ここから PDF 対策入りの read_snippet =====================================
+
 def read_snippet(path_candidates: Iterable[Path]) -> str:
     """Return concatenated snippets from available files or directories.
 
-    The index directory may contain per-category folders (e.g., ``indexes/Python``)
-    rather than flat files. To honor that layout we gather a few readable files
-    from each candidate directory while still supporting direct file paths.
-    Missing or unreadable files are skipped.
+    - index_dir の直下またはサブディレクトリから、テキストとして読めそうなものを少数選んで結合。
+    - PDF 本体（.pdf）や内容が `%PDF-1.x` で始まるようなものはスキップ。
+    - PDF→TXT 変換されたファイルに `%PDF-1.x ... %%EOF` 断片が残っている場合も、
+      後段の `_clean_text` でまとめて削除する。
     """
+
+    def _safe_read_text(path: Path) -> str:
+        """PDFや明らかなバイナリを弾きつつUTF-8で読む小ヘルパー。"""
+        # 拡張子が .pdf なら即スキップ
+        if path.suffix.lower() == ".pdf":
+            return ""
+
+        try:
+            with path.open("rb") as f:
+                head = f.read(2048)
+                # PDFシグネチャを検出したらこのファイルは完全に無視
+                if b"%PDF-" in head[:1024]:
+                    return ""
+                rest = f.read()
+        except OSError:
+            return ""
+
+        data = head + rest
+        # UTF-8 として読みつつ、壊れているところは置換
+        return data.decode("utf-8", errors="replace")
 
     snippets: list[str] = []
     for path in path_candidates:
         if path.is_file():
-            try:
-                snippets.append(path.read_text(encoding="utf-8", errors="replace"))
-            except OSError:
-                continue
+            text = _safe_read_text(path)
+            if text:
+                snippets.append(text)
             continue
 
         if path.is_dir():
             try:
-                # Prefer a small, deterministic subset to avoid traversing
-                # excessively large trees.
+                # 大きくなりすぎないよう、各ディレクトリの最初の数件だけ読む
                 for child in sorted(path.iterdir())[:5]:
                     if child.is_file():
-                        try:
-                            snippets.append(child.read_text(encoding="utf-8", errors="replace"))
-                        except OSError:
-                            continue
+                        text = _safe_read_text(child)
+                        if text:
+                            snippets.append(text)
             except OSError:
                 continue
 
+    # まとめたテキストを一括でクリーンアップ
     return _clean_text("\n\n".join(snippets))
+
+
+# =======================================================================
 
 
 def collect_section_snippet(index_dir: Path, theme: str, *, limit: int = 3) -> str:
@@ -716,22 +740,33 @@ def _is_llm_error(text: str | None) -> bool:
     return not text or text.startswith("[LLM error")
 
 
+# === PDF 断片や文字化けを強めに掃除する _clean_text ==============================
+
 def _clean_text(text: str) -> str:
     """Remove garbled characters and collapse duplicate lines/sentences.
 
-    The source knowledge files occasionally include replacement characters
-    (e.g., ``�``) and repeated paragraphs. Cleaning them before and after LLM
-    calls reduces visible artifacts in the rendered sections.
+    - 置換文字（�など）やBOMを削除
+    - インデックス内に紛れ込んだ PDF 生データ（%PDF-...〜%%EOF）を削除
+    - 連続する同一文を間引く
     """
 
     if not text:
         return ""
 
-    # Strip common replacement characters or byte-order marks.
-    cleaned = text.replace("\ufffd", "").replace("\ufeff", "")
+    # BOM / 置換文字の除去
+    cleaned = text.replace("\ufeff", "")
+    cleaned = cleaned.replace("\ufffd", "")
     cleaned = re.sub(r"�+", "", cleaned)
 
-    # Deduplicate consecutive sentences within a paragraph.
+    # PDF 生データっぽい塊を削除（PDF→TXT でもそのまま残っていることがある）
+    cleaned = re.sub(
+        r"%PDF-\d\.\d[\s\S]*?(?:%%EOF|$)",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+
+    # 段落ごとに分割し、連続する同一文を削る
     paragraphs = [para.strip() for para in cleaned.split("\n")]
     normalized_paragraphs: list[str] = []
     for para in paragraphs:
@@ -754,6 +789,9 @@ def _clean_text(text: str) -> str:
     collapsed = "\n".join(normalized_paragraphs)
     collapsed = re.sub(r"\n{3,}", "\n\n", collapsed)
     return collapsed.strip()
+
+
+# =======================================================================
 
 
 def _format_text_block(text: str) -> str:
