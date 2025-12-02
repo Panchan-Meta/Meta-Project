@@ -28,8 +28,13 @@ BASE_DIR = Path("/var/www/Meta-Project")
 INDEX_DIR = BASE_DIR / "indexes"
 DEFAULT_OUTPUT_DIR = Path("/mnt/hgfs/output")
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate")
-LLM_TIMEOUT = 900
-MIN_SECTION_CHARS = 3000
+LLM_TIMEOUT = int(os.environ.get("LLM_TIMEOUT", "120"))
+MIN_SECTION_CHARS = int(os.environ.get("MIN_SECTION_CHARS", "1800"))
+SECTION_MODEL = os.environ.get("BLOG_BUILDER_SECTION_MODEL", "phi3:mini")
+CLASSIFIER_MODEL = os.environ.get("BLOG_BUILDER_CLASSIFIER_MODEL", "phi3:mini")
+ENABLE_CHART_LLM = os.environ.get("BLOG_BUILDER_CHART_LLM", "0") == "1"
+CHART_MODEL = os.environ.get("BLOG_BUILDER_CHART_MODEL", SECTION_MODEL)
+LLM_CALL_COUNT = 0
 SCRIPT_CATEGORY_FILES = [
     "Web3",
     "NFT",
@@ -270,7 +275,10 @@ def status_scope(function_name: str, *, program: str = "blog_builder", file: str
         STATUS_REPORTER.update(program=program, function="idle", file=file)
 
 
-def _post_llm(model: str, prompt: str, *, system: str | None = None) -> str:
+def _post_llm(model: str, prompt: str, *, system: str | None = None, track_call: bool = True) -> str:
+    global LLM_CALL_COUNT
+    if track_call:
+        LLM_CALL_COUNT += 1
     payload: dict[str, object] = {
         "model": model,
         "prompt": prompt,
@@ -290,7 +298,7 @@ def _post_llm(model: str, prompt: str, *, system: str | None = None) -> str:
 
 def warm_model(model: str) -> None:
     with status_scope(f"warm_model:{model}"):
-        _post_llm(model, prompt="warmup ping")
+        _post_llm(model, prompt="warmup ping", track_call=False)
 
 
 def read_snippet(path_candidates: Iterable[Path]) -> str:
@@ -369,7 +377,7 @@ def classify_with_llm(prompt: str, category_snippets: Mapping[str, str]) -> str 
         {snippets or '（スニペットなし）'}
         """
     )
-    llm_answer = _post_llm("phi3:mini", prompt_body, system=system)
+    llm_answer = _post_llm(CLASSIFIER_MODEL, prompt_body, system=system)
     if not llm_answer:
         return None
 
@@ -708,7 +716,7 @@ def summarize_section_with_llm(
             """
         )
 
-    llm_text = _post_llm("llama3:8b", body, system=system)
+    llm_text = _post_llm(SECTION_MODEL, body, system=system)
     if _is_llm_error(llm_text):
         llm_text = _fallback_section_summary(
             prompt=prompt,
@@ -738,6 +746,22 @@ def explain_chart_with_llm(
     *,
     chart_title: str,
 ) -> str:
+    if not ENABLE_CHART_LLM:
+        if pack.code == "ja":
+            return (
+                f"図「{chart_title}」は{theme}の文脈で、{', '.join(labels)}のバランスを値{values}として示す。\n"
+                "極端な値の差を冷静に読み取り、見出しの問いに沿って解釈する。"
+            )
+        if pack.code == "it":
+            return (
+                f"Il grafico '{chart_title}' per '{theme}' mette a confronto {', '.join(labels)} con valori {values}.\n"
+                "Le differenze evidenziano dove attenzione e rischio vanno calibrati."
+            )
+        return (
+            f"The chart '{chart_title}' ties the theme '{theme}' to the {labels} weights {values}.\n"
+            "It highlights where Yohane would lean in or step back while calibrating risk."
+        )
+
     if pack.code == "ja":
         system = (
             "あなたは日本語でグラフを簡潔に解説するアシスタントです。出力は日本語のみで翻訳注記は禁止。"
@@ -762,7 +786,7 @@ def explain_chart_with_llm(
             Persona tone: calm, critical, and slightly punk.
             """
         )
-    llm_text = _post_llm("llama3:8b", prompt_body, system=system)
+    llm_text = _post_llm(CHART_MODEL, prompt_body, system=system)
     if _is_llm_error(llm_text):
         if pack.code == "ja":
             return (
@@ -873,7 +897,67 @@ def build_outro(common_text: str, pack: LanguagePack) -> str:
     return "\n".join(outro_parts)
 
 
-def compose_html(title: str, description: str, intro: str, sections: list[Section], outro: str, *, padding_phrase: str) -> str:
+def _shorten_phrase(text: str, *, limit: int = 28) -> str:
+    squashed = " ".join(text.split())
+    if len(squashed) <= limit:
+        return squashed
+    return squashed[:limit] + "…"
+
+
+def _sanitize_tag(label: str) -> str:
+    cleaned = re.sub(r"[#]+", "", label)
+    cleaned = re.sub(r"\s+", "-", cleaned.strip())
+    return f"#{cleaned}"
+
+
+def _build_persona_description(prompt: str, category: str, pack: LanguagePack) -> str:
+    trimmed = _shorten_phrase(prompt, limit=36)
+    if pack.code == "ja":
+        return (
+            f"ヨハネが{category}の歪さをかみ砕き、「{trimmed}」を夜のカフェ目線で要約する後書き。"
+            "リスクと静けさのバランスを探る読者に向けた一息メモ。"
+        )
+    if pack.code == "it":
+        return (
+            f"Yohane smonta le crepe di {category} e riassume '{trimmed}' con lo sguardo notturno del caffè,"
+            " per chi cerca equilibrio tra rischio e quiete."
+        )
+    return (
+        f"Yohane distills the cracks in {category}, turning '{trimmed}' into a late-night café recap for readers"
+        " hunting balance between risk and calm."
+    )
+
+
+def _build_persona_tags(prompt: str, category: str, pack: LanguagePack) -> str:
+    focus = _shorten_phrase(prompt, limit=18) or category
+    if pack.code == "ja":
+        big = [f"{category}解体", "ヨハネの夜視点"]
+        normal = ["静かな反逆", "リスク設計メモ"]
+        small = [f"{focus}断片", "データと物語"]
+    elif pack.code == "it":
+        big = [f"{category} senza filtri", "Lente notturna di Yohane"]
+        normal = ["punk-critico", "rischio-e-quiete"]
+        small = [f"nota-{_shorten_phrase(focus, limit=12)}", "dati-e-narrazione"]
+    else:
+        big = [f"{category} breakdown", "Yohane-night-lens"]
+        normal = ["quiet-punk", "risk-vs-calm"]
+        small = [f"{focus}-memo", "data-x-story"]
+
+    tags = big + normal + small
+    return " ".join(_sanitize_tag(tag) for tag in tags)
+
+
+def compose_html(
+    title: str,
+    description: str,
+    intro: str,
+    sections: list[Section],
+    outro: str,
+    *,
+    padding_phrase: str,
+    persona_description: str,
+    persona_tags: str,
+) -> str:
     body_parts = [
         f"<h1>{html.escape(title)}</h1>",
         f"<p class='description'>{_format_text_block(description)}</p>",
@@ -886,6 +970,13 @@ def compose_html(title: str, description: str, intro: str, sections: list[Sectio
         if section.chart_note.strip():
             body_parts.append(f"<p class='chart-note'>{_format_text_block(section.chart_note)}</p>")
     body_parts.append(f"<h2>Outro</h2><p>{_format_text_block(outro)}</p>")
+
+    body_parts.append("<section class='persona-meta'>")
+    body_parts.append("<h3>Description</h3>")
+    body_parts.append(f"<p class='persona-description'>{_format_text_block(persona_description)}</p>")
+    body_parts.append("<h3>Tags</h3>")
+    body_parts.append(f"<p class='persona-tags'>{html.escape(persona_tags)}</p>")
+    body_parts.append("</section>")
 
     html_doc = "\n".join(body_parts)
     return "<article>" + html_doc + "</article>"
@@ -903,6 +994,8 @@ def build_article(
         sections = generate_sections(prompt, category, pack, category_snippet=category_snippet)
         title = pack.title_template.format(category=category or "")
         outro = build_outro(common_text, pack)
+        persona_description = _build_persona_description(prompt, category, pack)
+        persona_tags = _build_persona_tags(prompt, category, pack)
         return compose_html(
             title,
             pack.description,
@@ -910,6 +1003,8 @@ def build_article(
             sections,
             outro,
             padding_phrase=pack.padding_phrase,
+            persona_description=persona_description,
+            persona_tags=persona_tags,
         )
 
 
@@ -935,8 +1030,10 @@ def generate_blogs(prompt: str, output_dir: Path = DEFAULT_OUTPUT_DIR) -> dict[s
     """Generate and persist multilingual blogs, returning metadata and HTML bodies."""
 
     with status_scope("generate_blogs"):
-        warm_model("phi3:mini")
-        warm_model("llama3:8b")
+        warm_model(CLASSIFIER_MODEL)
+        warm_model(SECTION_MODEL)
+        if ENABLE_CHART_LLM:
+            warm_model(CHART_MODEL)
 
         category_files = discover_category_files(INDEX_DIR)
         category_snippets = {name: read_snippet([path]) for name, path in category_files.items()}
@@ -955,6 +1052,7 @@ def generate_blogs(prompt: str, output_dir: Path = DEFAULT_OUTPUT_DIR) -> dict[s
             "slug": slug,
             "files": {},
             "html": {},
+            "llm_calls": 0,
         }
 
         for pack in packs:
@@ -969,6 +1067,8 @@ def generate_blogs(prompt: str, output_dir: Path = DEFAULT_OUTPUT_DIR) -> dict[s
             output_path.write_text(article_html, encoding="utf-8")
             results["files"][pack.code] = str(output_path)
             results["html"][pack.code] = article_html
+
+        results["llm_calls"] = LLM_CALL_COUNT
 
         return results
 
