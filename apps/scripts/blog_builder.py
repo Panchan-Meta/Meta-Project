@@ -9,11 +9,14 @@ shared knowledge files.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import html
 import os
 import re
 import textwrap
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Mapping
@@ -205,6 +208,57 @@ class Section:
     chart_note: str
 
 
+class StatusReporter:
+    """Periodically records the active program/function for clients."""
+
+    def __init__(self, *, interval_seconds: int = 300) -> None:
+        self.interval_seconds = interval_seconds
+        self._current: dict[str, str] = {"program": "", "function": "", "file": ""}
+        self._messages: list[dict[str, str]] = []
+        self._lock = threading.Lock()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def update(self, *, program: str, function: str, file: str) -> None:
+        with self._lock:
+            self._current = {"program": program, "function": function, "file": file}
+
+    def _loop(self) -> None:
+        while True:
+            time.sleep(self.interval_seconds)
+            with self._lock:
+                snapshot = {
+                    **self._current,
+                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                }
+                self._messages.append(snapshot)
+
+    def pop_messages(self, *, include_current: bool = False) -> list[dict[str, str]]:
+        with self._lock:
+            messages = list(self._messages)
+            self._messages.clear()
+            if include_current and any(self._current.values()):
+                messages.append(
+                    {
+                        **self._current,
+                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    }
+                )
+            return messages
+
+
+STATUS_REPORTER = StatusReporter()
+
+
+@contextlib.contextmanager
+def status_scope(function_name: str, *, program: str = "blog_builder", file: str = __file__):
+    STATUS_REPORTER.update(program=program, function=function_name, file=file)
+    try:
+        yield
+    finally:
+        STATUS_REPORTER.update(program=program, function="idle", file=file)
+
+
 def _post_llm(model: str, prompt: str, *, system: str | None = None) -> str:
     payload: dict[str, object] = {
         "model": model,
@@ -224,7 +278,8 @@ def _post_llm(model: str, prompt: str, *, system: str | None = None) -> str:
 
 
 def warm_model(model: str) -> None:
-    _post_llm(model, prompt="warmup ping")
+    with status_scope(f"warm_model:{model}"):
+        _post_llm(model, prompt="warmup ping")
 
 
 def read_snippet(path_candidates: Iterable[Path]) -> str:
@@ -572,73 +627,76 @@ def explain_chart_with_llm(
 def generate_sections(
     prompt: str, category: str, pack: LanguagePack, *, category_snippet: str
 ) -> list[Section]:
-    base = _deterministic_numbers(prompt + category + pack.code, 12, 9)
-    sections: list[Section] = []
+    with status_scope(f"generate_sections:{pack.code}"):
+        base = _deterministic_numbers(prompt + category + pack.code, 12, 9)
+        sections: list[Section] = []
 
-    for idx, theme in enumerate(pack.themes):
-        if idx % 3 == 0:
-            values = base[idx : idx + 3]
-            labels = pack.chart_labels["bar"]
-            diagram = build_bar_chart(
+        for idx, theme in enumerate(pack.themes):
+            if idx % 3 == 0:
+                values = base[idx : idx + 3]
+                labels = pack.chart_labels["bar"]
+                diagram = build_bar_chart(
+                    values,
+                    labels,
+                    title=pack.chart_titles["bar"],
+                    caption=pack.chart_captions["bar"],
+                    aria_label=pack.chart_titles["bar"],
+                )
+            elif idx % 3 == 1:
+                values = base[idx : idx + 4]
+                labels = pack.chart_labels["line"]
+                diagram = build_line_chart(
+                    values,
+                    labels,
+                    title=pack.chart_titles["line"],
+                    caption=pack.chart_captions["line"],
+                    aria_label=pack.chart_titles["line"],
+                )
+            else:
+                values = base[idx : idx + 3]
+                labels = pack.chart_labels["pie"]
+                diagram = build_pie_chart(
+                    values,
+                    labels,
+                    title=pack.chart_titles["pie"],
+                    caption=pack.chart_captions["pie"],
+                    aria_label=pack.chart_titles["pie"],
+                )
+
+            body = textwrap.dedent(
+                pack.section_body_template.format(prompt=prompt, category=category, theme=theme)
+            ).strip()
+
+            chart_title = pack.chart_titles[
+                "bar" if idx % 3 == 0 else "line" if idx % 3 == 1 else "pie"
+            ]
+            llm_summary = summarize_section_with_llm(
+                prompt,
+                category,
+                theme,
+                pack,
+                category_snippet,
+                values=values,
+                labels=labels,
+                chart_title=chart_title,
+            )
+            chart_note = explain_chart_with_llm(
                 values,
                 labels,
-                title=pack.chart_titles["bar"],
-                caption=pack.chart_captions["bar"],
-                aria_label=pack.chart_titles["bar"],
-            )
-        elif idx % 3 == 1:
-            values = base[idx : idx + 4]
-            labels = pack.chart_labels["line"]
-            diagram = build_line_chart(
-                values,
-                labels,
-                title=pack.chart_titles["line"],
-                caption=pack.chart_captions["line"],
-                aria_label=pack.chart_titles["line"],
-            )
-        else:
-            values = base[idx : idx + 3]
-            labels = pack.chart_labels["pie"]
-            diagram = build_pie_chart(
-                values,
-                labels,
-                title=pack.chart_titles["pie"],
-                caption=pack.chart_captions["pie"],
-                aria_label=pack.chart_titles["pie"],
+                theme,
+                pack,
+                chart_title=chart_title,
             )
 
-        body = textwrap.dedent(
-            pack.section_body_template.format(prompt=prompt, category=category, theme=theme)
-        ).strip()
-
-        chart_title = pack.chart_titles["bar" if idx % 3 == 0 else "line" if idx % 3 == 1 else "pie"]
-        llm_summary = summarize_section_with_llm(
-            prompt,
-            category,
-            theme,
-            pack,
-            category_snippet,
-            values=values,
-            labels=labels,
-            chart_title=chart_title,
-        )
-        chart_note = explain_chart_with_llm(
-            values,
-            labels,
-            theme,
-            pack,
-            chart_title=chart_title,
-        )
-
-        sections.append(
-            Section(
-                heading=theme,
-                body=body + "\n" + llm_summary,
-                diagram_html=diagram,
-                chart_note=chart_note,
+            sections.append(
+                Section(
+                    heading=theme,
+                    body=body + "\n" + llm_summary,
+                    diagram_html=diagram,
+                    chart_note=chart_note,
+                )
             )
-        )
-    return sections
+        return sections
 
 
 def build_outro(common_text: str, pack: LanguagePack) -> str:
@@ -676,17 +734,18 @@ def build_article(
     common_text: str,
     category_snippet: str,
 ) -> str:
-    sections = generate_sections(prompt, category, pack, category_snippet=category_snippet)
-    title = pack.title_template.format(category=category or "")
-    outro = build_outro(common_text, pack)
-    return compose_html(
-        title,
-        pack.description,
-        pack.intro,
-        sections,
-        outro,
-        padding_phrase=pack.padding_phrase,
-    )
+    with status_scope(f"build_article:{pack.code}"):
+        sections = generate_sections(prompt, category, pack, category_snippet=category_snippet)
+        title = pack.title_template.format(category=category or "")
+        outro = build_outro(common_text, pack)
+        return compose_html(
+            title,
+            pack.description,
+            pack.intro,
+            sections,
+            outro,
+            padding_phrase=pack.padding_phrase,
+        )
 
 
 def parse_args() -> argparse.Namespace:
@@ -710,42 +769,43 @@ def _slugify(text: str) -> str:
 def generate_blogs(prompt: str, output_dir: Path = DEFAULT_OUTPUT_DIR) -> dict[str, object]:
     """Generate and persist multilingual blogs, returning metadata and HTML bodies."""
 
-    warm_model("phi3:mini")
-    warm_model("llama3:8b")
+    with status_scope("generate_blogs"):
+        warm_model("phi3:mini")
+        warm_model("llama3:8b")
 
-    category_files = discover_category_files(INDEX_DIR)
-    category_snippets = {name: read_snippet([path]) for name, path in category_files.items()}
-    category = classify_with_llm(prompt, category_snippets) or choose_category(prompt, category_snippets)
+        category_files = discover_category_files(INDEX_DIR)
+        category_snippets = {name: read_snippet([path]) for name, path in category_files.items()}
+        category = classify_with_llm(prompt, category_snippets) or choose_category(prompt, category_snippets)
 
-    common_candidates = [INDEX_DIR / name for name in COMMON_FILES] + [INDEX_DIR / (name + ".txt") for name in COMMON_FILES]
-    common_text = read_snippet(common_candidates)
+        common_candidates = [INDEX_DIR / name for name in COMMON_FILES] + [INDEX_DIR / (name + ".txt") for name in COMMON_FILES]
+        common_text = read_snippet(common_candidates)
 
-    slug = _slugify(prompt)
-    output_dir.mkdir(parents=True, exist_ok=True)
+        slug = _slugify(prompt)
+        output_dir.mkdir(parents=True, exist_ok=True)
 
-    packs = get_language_packs()
-    results: dict[str, object] = {
-        "category": category,
-        "flag": "FLAG:FILES_SENT",
-        "slug": slug,
-        "files": {},
-        "html": {},
-    }
+        packs = get_language_packs()
+        results: dict[str, object] = {
+            "category": category,
+            "flag": "FLAG:FILES_SENT",
+            "slug": slug,
+            "files": {},
+            "html": {},
+        }
 
-    for pack in packs:
-        article_html = build_article(
-            prompt,
-            pack,
-            category=category,
-            common_text=common_text,
-            category_snippet=category_snippets.get(category, ""),
-        )
-        output_path = output_dir / f"{slug}_{pack.code}.html"
-        output_path.write_text(article_html, encoding="utf-8")
-        results["files"][pack.code] = str(output_path)
-        results["html"][pack.code] = article_html
+        for pack in packs:
+            article_html = build_article(
+                prompt,
+                pack,
+                category=category,
+                common_text=common_text,
+                category_snippet=category_snippets.get(category, ""),
+            )
+            output_path = output_dir / f"{slug}_{pack.code}.html"
+            output_path.write_text(article_html, encoding="utf-8")
+            results["files"][pack.code] = str(output_path)
+            results["html"][pack.code] = article_html
 
-    return results
+        return results
 
 
 def main() -> None:
