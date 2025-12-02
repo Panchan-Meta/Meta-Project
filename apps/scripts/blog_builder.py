@@ -29,10 +29,12 @@ INDEX_DIR = BASE_DIR / "indexes"
 DEFAULT_OUTPUT_DIR = Path("/mnt/hgfs/output")
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate")
 LLM_TIMEOUT = int(os.environ.get("LLM_TIMEOUT", "120"))
-MIN_SECTION_CHARS = int(os.environ.get("MIN_SECTION_CHARS", "1800"))
+MIN_SECTION_CHARS = int(os.environ.get("MIN_SECTION_CHARS", "1100"))
+LLM_MAX_TOKENS = int(os.environ.get("LLM_MAX_TOKENS", "900"))
 SECTION_MODEL = os.environ.get("BLOG_BUILDER_SECTION_MODEL", "phi3:mini")
 CLASSIFIER_MODEL = os.environ.get("BLOG_BUILDER_CLASSIFIER_MODEL", "phi3:mini")
 ENABLE_CHART_LLM = os.environ.get("BLOG_BUILDER_CHART_LLM", "0") == "1"
+WARM_MODELS = os.environ.get("BLOG_BUILDER_WARM_MODELS", "0") == "1"
 CHART_MODEL = os.environ.get("BLOG_BUILDER_CHART_MODEL", SECTION_MODEL)
 LLM_CALL_COUNT = 0
 SCRIPT_CATEGORY_FILES = [
@@ -59,6 +61,7 @@ class LanguagePack:
     themes: list[str]
     section_body_template: str
     context_line: str
+    summary_heading: str
     chart_labels: dict[str, list[str]]
     chart_titles: dict[str, str]
     chart_captions: dict[str, str]
@@ -91,6 +94,7 @@ def get_language_packs() -> list[LanguagePack]:
                 "与えられたテーマを軸に、欧州の地政学リスク、ドル覇権、分散型テクノロジーの進化を重ね合わせ、"
                 "盲目的な熱狂ではなく自分で考え抜くためのフレームを組み立てる。"
             ),
+            summary_heading="総論",
             chart_labels={
                 "bar": ["技術", "市場", "文化"],
                 "line": ["短期", "中期", "長期", "その先"],
@@ -136,6 +140,7 @@ def get_language_packs() -> list[LanguagePack]:
                 "It layers European geopolitics, dollar hegemony, and decentralized tech progress to offer a thinking frame"
                 " that resists blind hype."
             ),
+            summary_heading="Conclusion",
             chart_labels={
                 "bar": ["Tech", "Markets", "Culture"],
                 "line": ["Short", "Mid", "Long", "Beyond"],
@@ -180,6 +185,7 @@ def get_language_packs() -> list[LanguagePack]:
                 "Intreccia geopolitica europea, egemonia del dollaro e progresso delle tecnologie decentralizzate per"
                 " costruire un frame di pensiero autonomo lontano dall'entusiasmo cieco."
             ),
+            summary_heading="Conclusione",
             chart_labels={
                 "bar": ["Tecnologia", "Mercati", "Cultura"],
                 "line": ["Breve", "Medio", "Lungo", "Oltre"],
@@ -284,6 +290,8 @@ def _post_llm(model: str, prompt: str, *, system: str | None = None, track_call:
         "prompt": prompt,
         "stream": False,
     }
+    if LLM_MAX_TOKENS:
+        payload["options"] = {"num_predict": LLM_MAX_TOKENS}
     if system:
         payload["system"] = system
 
@@ -897,6 +905,22 @@ def build_outro(common_text: str, pack: LanguagePack) -> str:
     return "\n".join(outro_parts)
 
 
+def _build_summary_section(outro: str, pack: LanguagePack, *, category: str) -> Section:
+    extended_outro = _ensure_minimum_length(
+        outro,
+        min_chars=MIN_SECTION_CHARS,
+        padding_phrase=pack.padding_phrase,
+        theme=pack.summary_heading,
+        category=category,
+    )
+    return Section(
+        heading=pack.summary_heading,
+        body=extended_outro,
+        diagram_html="",
+        chart_note="",
+    )
+
+
 def _shorten_phrase(text: str, *, limit: int = 28) -> str:
     squashed = " ".join(text.split())
     if len(squashed) <= limit:
@@ -952,7 +976,7 @@ def compose_html(
     description: str,
     intro: str,
     sections: list[Section],
-    outro: str,
+    summary_section: Section,
     *,
     padding_phrase: str,
     persona_description: str,
@@ -969,7 +993,15 @@ def compose_html(
         body_parts.append(section.diagram_html)
         if section.chart_note.strip():
             body_parts.append(f"<p class='chart-note'>{_format_text_block(section.chart_note)}</p>")
-    body_parts.append(f"<h2>Outro</h2><p>{_format_text_block(outro)}</p>")
+    body_parts.append(f"<h2>{html.escape(summary_section.heading)}</h2>")
+    body_parts.append(f"<p>{_format_text_block(summary_section.body)}</p>")
+
+    body_parts.append("<section class='persona-meta'>")
+    body_parts.append("<h3>Description</h3>")
+    body_parts.append(f"<p class='persona-description'>{_format_text_block(persona_description)}</p>")
+    body_parts.append("<h3>Tags</h3>")
+    body_parts.append(f"<p class='persona-tags'>{html.escape(persona_tags)}</p>")
+    body_parts.append("</section>")
 
     body_parts.append("<section class='persona-meta'>")
     body_parts.append("<h3>Description</h3>")
@@ -994,6 +1026,7 @@ def build_article(
         sections = generate_sections(prompt, category, pack, category_snippet=category_snippet)
         title = pack.title_template.format(category=category or "")
         outro = build_outro(common_text, pack)
+        summary_section = _build_summary_section(outro, pack, category=category)
         persona_description = _build_persona_description(prompt, category, pack)
         persona_tags = _build_persona_tags(prompt, category, pack)
         return compose_html(
@@ -1001,7 +1034,7 @@ def build_article(
             pack.description,
             pack.intro,
             sections,
-            outro,
+            summary_section,
             padding_phrase=pack.padding_phrase,
             persona_description=persona_description,
             persona_tags=persona_tags,
@@ -1030,10 +1063,11 @@ def generate_blogs(prompt: str, output_dir: Path = DEFAULT_OUTPUT_DIR) -> dict[s
     """Generate and persist multilingual blogs, returning metadata and HTML bodies."""
 
     with status_scope("generate_blogs"):
-        warm_model(CLASSIFIER_MODEL)
-        warm_model(SECTION_MODEL)
-        if ENABLE_CHART_LLM:
-            warm_model(CHART_MODEL)
+        if WARM_MODELS:
+            warm_model(CLASSIFIER_MODEL)
+            warm_model(SECTION_MODEL)
+            if ENABLE_CHART_LLM:
+                warm_model(CHART_MODEL)
 
         category_files = discover_category_files(INDEX_DIR)
         category_snippets = {name: read_snippet([path]) for name, path in category_files.items()}
