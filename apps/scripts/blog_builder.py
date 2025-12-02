@@ -322,7 +322,7 @@ def read_snippet(path_candidates: Iterable[Path]) -> str:
     for path in path_candidates:
         if path.is_file():
             try:
-                snippets.append(path.read_text(encoding="utf-8"))
+                snippets.append(path.read_text(encoding="utf-8", errors="replace"))
             except OSError:
                 continue
             continue
@@ -334,7 +334,7 @@ def read_snippet(path_candidates: Iterable[Path]) -> str:
                 for child in sorted(path.iterdir())[:5]:
                     if child.is_file():
                         try:
-                            snippets.append(child.read_text(encoding="utf-8"))
+                            snippets.append(child.read_text(encoding="utf-8", errors="replace"))
                         except OSError:
                             continue
             except OSError:
