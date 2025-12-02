@@ -61,7 +61,7 @@ def get_language_packs() -> list[LanguagePack]:
             code="ja",
             title_template="{category}で世界のバグを解体する夜",
             description="リスクと静けさを両立させたいヨハネに向けた、現実と物語の橋渡し。",
-            intro="哲学者気取りのヨハネのまなざしで、クライアントテーマを批判的に分解する長文ブログ。",
+            intro="哲学者気取りのヨハネのまなざしで、与えられたテーマを批判的に分解する長文ブログ。",
             themes=[
                 "市場とテクノロジーの歪さを読み解く",
                 "リスクとリターンのバランス設計",
@@ -72,7 +72,7 @@ def get_language_packs() -> list[LanguagePack]:
             ],
             section_body_template=(
                 "哲学者気取りのヨハネの視点から、{category}領域に潜む課題を具体的に検証する。{theme}という切り口で、"
-                "世界のバグを見抜こうとする冷静さと、パンクな衝動が同居する。クライアントから受け取ったテーマ「{prompt}」"
+                "世界のバグを見抜こうとする冷静さと、パンクな衝動が同居する。与えられたテーマ「{prompt}」"
                 "を軸に、欧州の地政学リスク、ドル覇権、分散型テクノロジーの進化を重ね合わせ、盲目的な熱狂ではなく"
                 "自分で考え抜くためのフレームを組み立てる。ヨハネが夜のカフェでチャートを眺めながら感じる虚無感を、"
                 "データ、ストーリー、リスク設計という3本柱で受け止め、同じ違和感を持つ読者に静かな伴走を提供する。"
@@ -410,41 +410,163 @@ def _cos_deg(angle: float) -> float:
     return math.cos(math.radians(angle))
 
 
+def _is_llm_error(text: str | None) -> bool:
+    return not text or text.startswith("[LLM error")
+
+
+def _fallback_section_summary(
+    *,
+    prompt: str,
+    category: str,
+    theme: str,
+    pack: LanguagePack,
+    values: list[int],
+    labels: list[str],
+    category_snippet: str,
+    chart_title: str,
+) -> str:
+    formatted_values = ", ".join(f"{label}:{value}" for label, value in zip(labels, values))
+    snippet_hint = category_snippet[:60] + ("…" if len(category_snippet) > 60 else "")
+    if pack.code == "ja":
+        return textwrap.dedent(
+            f"""
+            テーマ「{theme}」に沿って、{category}領域の論点「{prompt}」を再構成する。
+            図「{chart_title}」のデータ（{formatted_values}）を手掛かりに、ヨハネは強弱の差からリスク配分を読み直す。
+            参考スニペット: {snippet_hint or 'N/A'}。
+            パンクな疑いと静かな洞察を両立させ、見出し通りの論点に引き戻す。
+            """
+        ).strip()
+
+    if pack.code == "it":
+        return textwrap.dedent(
+            f"""
+            Con il tema "{theme}" rilegge il prompt "{prompt}" nel contesto {category}.
+            I dati del grafico "{chart_title}" ({formatted_values}) mostrano dove l'attenzione e il rischio cambiano intensità.
+            Estratto di riferimento: {snippet_hint or 'N/A'}.
+            Il tono resta sobrio e critico, così da rispettare titolo e diagramma.
+            """
+        ).strip()
+
+    return textwrap.dedent(
+        f"""
+        Using the theme "{theme}", Yohane reframes the client idea "{prompt}" inside the {category} lens.
+        The chart "{chart_title}" with values {formatted_values} anchors the section to the heading instead of repeating boilerplate.
+        Reference snippet: {snippet_hint or 'N/A'}.
+        The stance stays analytical and skeptical while following what the title and diagram demand.
+        """
+    ).strip()
+
+
 def summarize_section_with_llm(
     prompt: str,
     category: str,
     theme: str,
     pack: LanguagePack,
     category_snippet: str,
+    *,
+    values: list[int],
+    labels: list[str],
+    chart_title: str,
 ) -> str:
-    system = (
-        "You are a structured blog assistant. Keep the language aligned to the user locale."
-    )
-    body = textwrap.dedent(
-        f"""
-        Write 3-4 sentences in {pack.code} summarizing the client theme for persona Yohane.
-        Theme keyword: {theme}
-        Chosen category: {category}
-        Client prompt: {prompt}
-        Category reference (trimmed):
-        {category_snippet[:1200] or 'N/A'}
-        Keep it analytical, skeptical, and reflective.
-        """
-    )
-    return _post_llm("llama3:8b", body, system=system)
+    if pack.code == "ja":
+        system = (
+            "あなたは日本語のブログ執筆アシスタントです。出力は日本語のみで、翻訳や英訳の挿入は禁止。"
+            "『クライアント』という語を使わず、一般公開向けに、冷静で批判的かつ少しパンクにまとめる。"
+        )
+        body = textwrap.dedent(
+            f"""
+            見出し「{theme}」を3〜4文で要約してください。英訳・翻訳注記は不要です。
+            カテゴリ: {category}
+            テーマ文: {prompt}
+            参考スニペット抜粋:
+            {category_snippet[:1200] or 'N/A'}
+            図のタイトル: {chart_title}
+            ラベルと値: {list(zip(labels, values))}
+            語調: 冷静で批判的、かすかなパンクさを含める。
+            """
+        )
+    else:
+        system = (
+            "You are a structured blog assistant. Keep the language aligned to the user locale."
+        )
+        body = textwrap.dedent(
+            f"""
+            Write 3-4 sentences in {pack.code} summarizing the theme for persona Yohane.
+            Theme keyword: {theme}
+            Chosen category: {category}
+            Prompt text: {prompt}
+            Category reference (trimmed):
+            {category_snippet[:1200] or 'N/A'}
+            Chart title: {chart_title}
+            Chart labels and values: {list(zip(labels, values))}
+            Keep it analytical, skeptical, and reflective.
+            """
+        )
+
+    llm_text = _post_llm("llama3:8b", body, system=system)
+    if _is_llm_error(llm_text):
+        return _fallback_section_summary(
+            prompt=prompt,
+            category=category,
+            theme=theme,
+            pack=pack,
+            values=values,
+            labels=labels,
+            category_snippet=category_snippet,
+            chart_title=chart_title,
+        )
+    return llm_text
 
 
-def explain_chart_with_llm(values: list[int], labels: list[str], theme: str, pack: LanguagePack) -> str:
-    system = "Provide concise chart commentary matching the locale."
-    prompt_body = textwrap.dedent(
-        f"""
-        Summarize the following synthetic chart insightfully in {pack.code}. Keep it to 2 sentences.
-        Theme: {theme}
-        Labels and values: {list(zip(labels, values))}
-        Persona tone: calm, critical, and slightly punk.
-        """
-    )
-    return _post_llm("llama3:8b", prompt_body, system=system)
+def explain_chart_with_llm(
+    values: list[int],
+    labels: list[str],
+    theme: str,
+    pack: LanguagePack,
+    *,
+    chart_title: str,
+) -> str:
+    if pack.code == "ja":
+        system = (
+            "あなたは日本語でグラフを簡潔に解説するアシスタントです。出力は日本語のみで翻訳注記は禁止。"
+        )
+        prompt_body = textwrap.dedent(
+            f"""
+            以下の擬似データを持つ図を2文で解説してください。英訳・翻訳の併記は禁止です。
+            テーマ: {theme}
+            図のタイトル: {chart_title}
+            ラベルと値: {list(zip(labels, values))}
+            トーン: 冷静で批判的、わずかにパンク。
+            """
+        )
+    else:
+        system = "Provide concise chart commentary matching the locale."
+        prompt_body = textwrap.dedent(
+            f"""
+            Summarize the following synthetic chart insightfully in {pack.code}. Keep it to 2 sentences.
+            Theme: {theme}
+            Chart title: {chart_title}
+            Labels and values: {list(zip(labels, values))}
+            Persona tone: calm, critical, and slightly punk.
+            """
+        )
+    llm_text = _post_llm("llama3:8b", prompt_body, system=system)
+    if _is_llm_error(llm_text):
+        if pack.code == "ja":
+            return (
+                f"図「{chart_title}」は{theme}の文脈で、{', '.join(labels)}のバランスを値{values}として示す。"
+                " 極端な値の差を冷静に読み取り、見出しの問いに沿って解釈する。"
+            )
+        if pack.code == "it":
+            return (
+                f"Il grafico '{chart_title}' per '{theme}' mette a confronto {', '.join(labels)} con valori {values}."
+                " Le differenze evidenziano dove attenzione e rischio vanno calibrati."
+            )
+        return (
+            f"The chart '{chart_title}' ties the theme '{theme}' to the {labels} weights {values},"
+            " highlighting where Yohane would lean in or step back."
+        )
+    return llm_text
 
 
 def generate_sections(
@@ -489,8 +611,24 @@ def generate_sections(
             pack.section_body_template.format(prompt=prompt, category=category, theme=theme)
         ).strip()
 
-        llm_summary = summarize_section_with_llm(prompt, category, theme, pack, category_snippet)
-        chart_note = explain_chart_with_llm(values, labels, theme, pack)
+        chart_title = pack.chart_titles["bar" if idx % 3 == 0 else "line" if idx % 3 == 1 else "pie"]
+        llm_summary = summarize_section_with_llm(
+            prompt,
+            category,
+            theme,
+            pack,
+            category_snippet,
+            values=values,
+            labels=labels,
+            chart_title=chart_title,
+        )
+        chart_note = explain_chart_with_llm(
+            values,
+            labels,
+            theme,
+            pack,
+            chart_title=chart_title,
+        )
 
         sections.append(
             Section(
