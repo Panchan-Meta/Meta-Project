@@ -1,11 +1,17 @@
 """Generate persona-focused HTML blogs from client prompts.
 
-This script reads domain knowledge from ``/var/www/Meta-Project/indexes`` and
-categorizes a client-provided prompt into one of the predefined blog domains.
-It now produces compact, two-section HTML articles (main section + summary)
-totalling roughly 1,000 characters across Japanese, English, and Italian,
-tailored for the persona "哲学者気取りのヨハネ" and enriched by shared
-knowledge files.
+The article builder now follows a five-step pipeline aligned to the client
+brief:
+
+1. Extract categories and subcategories from ``indexes/articles`` using an LLM
+   classifier.
+2. Pull section text that best matches the client prompt from the chosen
+   category/subcategory.
+3. Merge that section text with knowledge files under ``indexes/mybrain`` and
+   craft a ~2,000-character summary with translations.
+4. Render supplemental rich HTML diagrams (with JavaScript) based on the same
+   context.
+5. Conclude every article with a dedicated "総論" section that recaps steps 1–4.
 """
 from __future__ import annotations
 
@@ -27,12 +33,14 @@ import requests
 
 BASE_DIR = Path("/var/www/Meta-Project")
 INDEX_DIR = BASE_DIR / "indexes"
+ARTICLES_DIR = INDEX_DIR / "articles"
+MYBRAIN_DIR = INDEX_DIR / "mybrain"
 DEFAULT_OUTPUT_DIR = Path("/mnt/hgfs/output")
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate")
 LLM_TIMEOUT = int(os.environ.get("LLM_TIMEOUT", "120"))
-MIN_SECTION_CHARS = int(os.environ.get("MIN_SECTION_CHARS", "350"))
-MAIN_SECTION_TARGET_CHARS = int(os.environ.get("MAIN_SECTION_TARGET_CHARS", "650"))
-MAX_ARTICLE_CHARS = int(os.environ.get("MAX_ARTICLE_CHARS", "1000"))
+MIN_SECTION_CHARS = int(os.environ.get("MIN_SECTION_CHARS", "600"))
+MAIN_SECTION_TARGET_CHARS = int(os.environ.get("MAIN_SECTION_TARGET_CHARS", "2000"))
+MAX_ARTICLE_CHARS = int(os.environ.get("MAX_ARTICLE_CHARS", "2600"))
 LLM_MAX_TOKENS = int(os.environ.get("LLM_MAX_TOKENS", "900"))
 SECTION_MODEL = os.environ.get("BLOG_BUILDER_SECTION_MODEL", "phi3:mini")
 CLASSIFIER_MODEL = os.environ.get("BLOG_BUILDER_CLASSIFIER_MODEL", "phi3:mini")
@@ -40,7 +48,7 @@ ENABLE_CHART_LLM = os.environ.get("BLOG_BUILDER_CHART_LLM", "0") == "1"
 WARM_MODELS = os.environ.get("BLOG_BUILDER_WARM_MODELS", "0") == "1"
 CHART_MODEL = os.environ.get("BLOG_BUILDER_CHART_MODEL", SECTION_MODEL)
 LLM_CALL_COUNT = 0
-SCRIPT_CATEGORY_FILES = [
+DEFAULT_SCRIPT_CATEGORIES = [
     "Web3",
     "NFT",
     "Cryptocurrency",
@@ -53,6 +61,10 @@ SCRIPT_CATEGORY_FILES = [
     "Dystopian",
 ]
 COMMON_FILES = ["mybrain", "catholic", "bible", "berkshire"]
+
+
+def persona_name(pack: LanguagePack) -> str:
+    return "John" if pack.code == "en" else "Yohane"
 
 
 @dataclass
@@ -125,8 +137,8 @@ def get_language_packs() -> list[LanguagePack]:
         LanguagePack(
             code="en",
             title_template="Dissecting the world's glitches through {category}",
-            description="A bridge between reality and narrative for Yohane, balancing risk with quiet focus.",
-            intro="From Yohane's restless yet analytical gaze, this article deconstructs the theme without blind hype.",
+            description="A bridge between reality and narrative for John, balancing risk with quiet focus.",
+            intro="From John's restless yet analytical gaze, this article deconstructs the theme without blind hype.",
             themes=[
                 "Reading the distortions of markets and technology",
                 "Designing the balance of risk and return",
@@ -136,7 +148,7 @@ def get_language_packs() -> list[LanguagePack]:
                 "Questions for the future and a working roadmap",
             ],
             section_body_template=(
-                "From Yohane's perspective, this piece examines the hidden challenges in {category}. By focusing on {theme},"
+                "From John's perspective, this piece examines the hidden challenges in {category}. By focusing on {theme},"
                 " it holds together punk urgency and cold rationality. {context} Late-night charts in a café, the unease of"
                 " volatility, and the trio of data, story, and risk design all converge to accompany readers who share the"
                 " same dissonance."
@@ -158,7 +170,7 @@ def get_language_packs() -> list[LanguagePack]:
                 "pie": "How decisions are weighted",
             },
             chart_captions={
-                "bar": "Imaginary distribution of Yohane's focus across domains.",
+                "bar": "Imaginary distribution of John's focus across domains.",
                 "line": "A modeled curve of how risk perception moves with time.",
                 "pie": "A synthetic balance among ethics, economy, and creativity.",
             },
@@ -167,7 +179,7 @@ def get_language_packs() -> list[LanguagePack]:
                 "Rahab's stage should stay a sandbox that welcomes both doubt and critique.",
                 "Keep holding both skepticism and the courage to believe—at the same time.",
             ],
-            padding_phrase="Yohane keeps unpacking his unease, walking readers through long-form reflection.",
+            padding_phrase="John keeps unpacking his unease, walking readers through long-form reflection.",
         ),
         LanguagePack(
             code="it",
@@ -373,29 +385,54 @@ def collect_section_snippet(index_dir: Path, theme: str, *, limit: int = 3) -> s
     return read_snippet(candidates)
 
 
-def discover_category_files(index_dir: Path) -> Mapping[str, Path]:
+def discover_category_files(
+    index_dir: Path, categories: Iterable[str], *, taxonomy: Mapping[str, list[Path]] | None = None
+) -> Mapping[str, Path]:
     """Map canonical category names to existing files under the index directory."""
 
     mapping: dict[str, Path] = {}
+    if taxonomy:
+        for name in categories:
+            if name in taxonomy:
+                mapping[name] = ARTICLES_DIR / name
+
     if not index_dir.exists():
         return mapping
 
     for path in index_dir.iterdir():
         candidate_name = path.stem if path.is_file() else path.name
-        for name in SCRIPT_CATEGORY_FILES:
+        for name in categories:
             normalized = name.lower().replace(" & ", " ")
             if candidate_name.lower().startswith(normalized):
-                mapping[name] = path
+                mapping.setdefault(name, path)
                 break
     return mapping
 
 
-def choose_category(prompt: str, category_snippets: Mapping[str, str]) -> str:
+def discover_article_taxonomy(articles_dir: Path) -> Mapping[str, list[Path]]:
+    """Return a mapping of categories to available subcategory paths."""
+
+    taxonomy: dict[str, list[Path]] = {}
+    if not articles_dir.exists():
+        return taxonomy
+
+    for category_path in sorted(articles_dir.iterdir()):
+        if category_path.is_dir():
+            subs = [child for child in sorted(category_path.iterdir()) if child.exists()]
+            taxonomy[category_path.name] = subs
+        elif category_path.is_file():
+            taxonomy.setdefault(category_path.stem, []).append(category_path)
+    return taxonomy
+
+
+def choose_category(prompt: str, category_snippets: Mapping[str, str], *, categories: Iterable[str]) -> str:
     """Choose the best matching category based on keyword overlap."""
 
     normalized = prompt.lower()
+    selected_categories = list(categories) or list(category_snippets)
     scores: dict[str, int] = {}
-    for category, snippet in category_snippets.items():
+    for category in selected_categories:
+        snippet = category_snippets.get(category, "")
         score = 0
         for token in category.lower().split():
             if token and token in normalized:
@@ -413,12 +450,15 @@ def choose_category(prompt: str, category_snippets: Mapping[str, str]) -> str:
     return best
 
 
-def classify_with_llm(prompt: str, category_snippets: Mapping[str, str]) -> str | None:
+def classify_with_llm(
+    prompt: str, category_snippets: Mapping[str, str], *, categories: Iterable[str] | None = None
+) -> str | None:
     """Use the LLM once to propose a category based on provided snippets."""
 
-    category_list = "\n".join(f"- {name}" for name in SCRIPT_CATEGORY_FILES)
+    categories = list(categories or category_snippets)
+    category_list = "\n".join(f"- {name}" for name in categories)
     snippets = "\n".join(
-        f"{name}: {snippet[:800]}" for name, snippet in category_snippets.items()
+        f"{name}: {category_snippets.get(name, '')[:800]}" for name in categories
     )
     system = (
         "あなたは分類器です。以下のカテゴリ一覧から最も近い1つを日本語で返してください。"
@@ -440,10 +480,20 @@ def classify_with_llm(prompt: str, category_snippets: Mapping[str, str]) -> str 
     if not llm_answer:
         return None
 
-    for name in SCRIPT_CATEGORY_FILES:
+    for name in categories:
         if name.lower() in llm_answer.lower():
             return name
     return None
+
+
+def choose_subcategory(prompt: str, sub_snippets: Mapping[str, str]) -> str | None:
+    if not sub_snippets:
+        return None
+
+    categories = list(sub_snippets)
+    return classify_with_llm(prompt, sub_snippets, categories=categories) or choose_category(
+        prompt, sub_snippets, categories=categories
+    )
 
 
 def _deterministic_numbers(prompt: str, count: int, scale: int) -> list[int]:
@@ -774,9 +824,10 @@ def _fallback_section_summary(
             """
         ).strip()
 
+    persona = persona_name(pack)
     return textwrap.dedent(
         f"""
-        Using the theme "{theme}", Yohane reframes the core questions inside the {category} lens.
+        Using the theme "{theme}", {persona} reframes the core questions inside the {category} lens.
         The chart "{chart_title}" with values {formatted_values} anchors the section to the heading instead of repeating boilerplate.
         Reference snippet: {snippet_hint or 'N/A'}.
         {pack.context_line}
@@ -817,13 +868,14 @@ def summarize_section_with_llm(
         )
     else:
         system = "You are a structured blog assistant. Keep the language aligned to the user locale."
+        persona = persona_name(pack)
         body = textwrap.dedent(
             f"""
-            Write a long-form section in {pack.code} with roughly 750 characters (at least {MIN_SECTION_CHARS}) for persona Yohane.
+            Write a long-form section in {pack.code} with roughly 750 characters (at least {MIN_SECTION_CHARS}) for persona {persona}.
             Theme keyword: {theme}
             Chosen category: {category}
             Desired structure:
-            - Opening: a vivid hook that ties Yohane's personal tension to the heading.
+            - Opening: a vivid hook that ties {persona}'s personal tension to the heading.
             - Middle: weave {pack.context_line} with concrete stories, data points, and ethical friction.
             - Later: interpret the chart '{chart_title}' using labels {labels} and values {values} to shape risk/return nuance.
             - Closing: offer a quiet companion message to readers.
@@ -876,9 +928,10 @@ def explain_chart_with_llm(
                 f"Il grafico '{chart_title}' per '{theme}' mette a confronto {', '.join(labels)} con valori {values}.\n"
                 "Le differenze evidenziano dove attenzione e rischio vanno calibrati."
             )
+        persona = persona_name(pack)
         return (
             f"The chart '{chart_title}' ties the theme '{theme}' to the {labels} weights {values}.\n"
-            "It highlights where Yohane would lean in or step back while calibrating risk."
+            f"It highlights where {persona} would lean in or step back while calibrating risk."
         )
 
     if pack.code == "ja":
@@ -917,9 +970,10 @@ def explain_chart_with_llm(
                 f"Il grafico '{chart_title}' per '{theme}' mette a confronto {', '.join(labels)} con valori {values}.\n"
                 "Le differenze evidenziano dove attenzione e rischio vanno calibrati."
             )
+        persona = persona_name(pack)
         return (
             f"The chart '{chart_title}' ties the theme '{theme}' to the {labels} weights {values}.\n"
-            "It highlights where Yohane would lean in or step back while calibrating risk."
+            f"It highlights where {persona} would lean in or step back while calibrating risk."
         )
     return _clean_text(llm_text)
 
@@ -937,8 +991,8 @@ def _summarize_main_section(
         system = "あなたは日本語で端的に執筆するブログライターです。"
         body = textwrap.dedent(
             f"""
-            クライアント指示を要約し、分類結果「{category}」に沿った見出し「{heading}」の本文を{target_chars}文字以内で作成してください。
-            /indexes配下のスニペットと共有知識（Berkshire, bible, catholic, mybrain）を下に引用せず要約し、翻訳や英語併記は禁止。
+            クライアント指示を要約し、分類結果「{category}」に沿った見出し「{heading}」の本文を{target_chars}文字前後で作成してください。
+            /indexes/articlesで抽出したセクションとmybrainの知識を引用せず統合し、翻訳や英語併記は禁止。
             全体の口調は冷静で批判的、少しパンクに。重複や箇条書きは避け、連続した短い段落でまとめる。
             利用できる素材:
             {combined_snippet[:1200] or 'N/A'}
@@ -948,8 +1002,8 @@ def _summarize_main_section(
         system = "Scrivi in italiano in modo conciso e coerente."
         body = textwrap.dedent(
             f"""
-            Riassumi le istruzioni del cliente e la categoria "{category}" nella sezione "{heading}" entro {target_chars} caratteri.
-            Usa gli appunti estratti da /indexes e dalle fonti Berkshire, bible, catholic, mybrain come contesto, senza citazioni dirette.
+            Riassumi le istruzioni del cliente e la categoria "{category}" nella sezione "{heading}" in circa {target_chars} caratteri.
+            Usa gli appunti estratti da /indexes/articles e le fonti Berkshire, bible, catholic, mybrain come contesto, senza citazioni dirette.
             Tono calmo, critico e leggermente punk; niente punti elenco, niente ripetizioni.
             Testo di riferimento:
             {combined_snippet[:1200] or 'N/A'}
@@ -959,8 +1013,8 @@ def _summarize_main_section(
         system = "Write a compact English main section with analytical calm."
         body = textwrap.dedent(
             f"""
-            Summarize the client brief under the category "{category}" as the section "{heading}" in under {target_chars} characters.
-            Use the extracted /indexes notes plus Berkshire, bible, catholic, and mybrain context; do not quote directly.
+            Summarize the client brief under the category "{category}" as the section "{heading}" in roughly {target_chars} characters.
+            Use the extracted /indexes/articles notes plus Berkshire, bible, catholic, and mybrain context; do not quote directly.
             Keep a critical, quietly punk tone without bullet points or repetition.
             Reference material:
             {combined_snippet[:1200] or 'N/A'}
@@ -991,17 +1045,21 @@ def generate_sections(
     category: str,
     pack: LanguagePack,
     *,
-    category_snippet: str,
-    common_text: str,
     main_heading: str,
     combined_snippet: str,
+    section_snippet: str,
+    knowledge_text: str,
+    subcategory: str | None,
 ) -> list[Section]:
     with status_scope(f"generate_sections:{pack.code}"):
+        blended_snippet = _clean_text(
+            "\n\n".join(part for part in (section_snippet, combined_snippet, knowledge_text) if part)
+        )
         main_body = _summarize_main_section(
             prompt=prompt,
             category=category,
             pack=pack,
-            combined_snippet=combined_snippet,
+            combined_snippet=blended_snippet or combined_snippet,
             heading=main_heading,
         )
         main_body = _ensure_minimum_length(
@@ -1012,12 +1070,28 @@ def generate_sections(
             category=category,
         )
 
+        chart_values = _deterministic_numbers(f"{prompt}:{category}:{subcategory or ''}", 3, 9)
+        diagram_html = build_bar_chart(
+            chart_values,
+            pack.chart_labels.get("bar", ["A", "B", "C"]),
+            title=pack.chart_titles.get("bar", "Synthetic chart"),
+            caption=pack.chart_captions.get("bar", ""),
+            aria_label=f"{category} — {subcategory or main_heading}",
+        )
+        chart_note = explain_chart_with_llm(
+            chart_values,
+            pack.chart_labels.get("bar", ["A", "B", "C"]),
+            subcategory or main_heading,
+            pack,
+            chart_title=pack.chart_titles.get("bar", "Synthetic chart"),
+        )
+
         return [
             Section(
                 heading=main_heading,
                 body=main_body,
-                diagram_html="",
-                chart_note="",
+                diagram_html=diagram_html,
+                chart_note=chart_note,
             )
         ]
 
@@ -1041,6 +1115,7 @@ def summarize_index_with_llm(
         body = textwrap.dedent(
             f"""
             以下のインデックス知識を踏まえ、テーマ「{prompt}」とカテゴリ「{category}」に沿った総論を3〜4文でまとめてください。
+            カテゴリ／サブカテゴリ抽出、セクション抜粋、mybrain要約、図解化という流れを踏まえた結論にしてください。
             同じ文章を繰り返さず、文字化けに見える記号は使わないこと。引用文や宣伝調は禁止。
             参照テキスト:
             {snippet}
@@ -1051,6 +1126,7 @@ def summarize_index_with_llm(
         body = textwrap.dedent(
             f"""
             Using the index notes below, craft a brief conclusion for category "{category}" and prompt "{prompt}".
+            Make sure it reflects the pipeline (category/subcategory detection, section extraction, mybrain synthesis, diagramming).
             Keep it 3-4 sentences, avoid repeated lines or garbled characters, and maintain an analytical, calm tone.
             Source notes:
             {snippet}
@@ -1119,8 +1195,9 @@ def _build_persona_description(prompt: str, category: str, pack: LanguagePack) -
             f"Yohane smonta le crepe di {category} e riassume '{trimmed}' con lo sguardo notturno del caffè,"
             " per chi cerca equilibrio tra rischio e quiete."
         )
+    persona = persona_name(pack)
     return (
-        f"Yohane distills the cracks in {category}, turning '{trimmed}' into a late-night café recap for readers"
+        f"{persona} distills the cracks in {category}, turning '{trimmed}' into a late-night café recap for readers"
         " hunting balance between risk and calm."
     )
 
@@ -1136,7 +1213,8 @@ def _build_persona_tags(prompt: str, category: str, pack: LanguagePack) -> str:
         normal = ["punk-critico", "rischio-e-quiete"]
         small = [f"nota-{_shorten_phrase(focus, limit=12)}", "dati-e-narrazione"]
     else:
-        big = [f"{category} breakdown", "Yohane-night-lens"]
+        persona = persona_name(pack)
+        big = [f"{category} breakdown", f"{persona}-night-lens"]
         normal = ["quiet-punk", "risk-vs-calm"]
         small = [f"{focus}-memo", "data-x-story"]
 
@@ -1155,6 +1233,7 @@ def _generate_section_heading(
     """Craft a persona-aware heading from index context without generic labels."""
 
     snippet = _clean_text(index_text)[:360]
+    persona = persona_name(pack)
     if pack.code == "ja":
         system = "15文字前後の日本語見出しを作る編集者です。"
         body = textwrap.dedent(
@@ -1184,7 +1263,7 @@ def _generate_section_heading(
         system = "You write compact, persona-aware headings."
         body = textwrap.dedent(
             f"""
-            Propose a single heading (~15 characters) for the {('core section' if kind == 'main' else 'wrap-up')} that resonates with persona "Yohane".
+            Propose a single heading (~15 characters) for the {('core section' if kind == 'main' else 'wrap-up')} that resonates with persona "{persona}".
             Theme: {prompt}
             Category: {category}
             Index clues (EN/JA):
@@ -1267,10 +1346,17 @@ def build_article(
     category: str,
     common_text: str,
     category_snippet: str,
+    section_snippet: str,
+    knowledge_text: str,
+    subcategory: str | None,
 ) -> str:
     with status_scope(f"build_article:{pack.code}"):
         combined_index_text = _clean_text(
-            "\n\n".join(part for part in (category_snippet, common_text) if part)
+            "\n\n".join(
+                part
+                for part in (category_snippet, section_snippet, knowledge_text, common_text)
+                if part
+            )
         )
         main_heading = _generate_section_heading(
             kind="main",
@@ -1279,21 +1365,16 @@ def build_article(
             pack=pack,
             index_text=combined_index_text,
         )
-        summary_heading = _generate_section_heading(
-            kind="summary",
-            prompt=prompt,
-            category=category,
-            pack=pack,
-            index_text=combined_index_text,
-        )
+        summary_heading = "総論" if pack.code == "ja" else f"{pack.summary_heading} / 総論"
         sections = generate_sections(
             prompt,
             category,
             pack,
-            category_snippet=category_snippet,
-            common_text=common_text,
             main_heading=main_heading,
             combined_snippet=combined_index_text,
+            section_snippet=section_snippet,
+            knowledge_text=knowledge_text,
+            subcategory=subcategory,
         )
         title = pack.title_template.format(category=category or "")
         outro = build_outro(common_text, pack)
@@ -1369,12 +1450,35 @@ def generate_blogs(prompt: str, output_dir: Path = DEFAULT_OUTPUT_DIR) -> dict[s
             if ENABLE_CHART_LLM:
                 warm_model(CHART_MODEL)
 
-        category_files = discover_category_files(INDEX_DIR)
+        taxonomy = discover_article_taxonomy(ARTICLES_DIR)
+        available_categories = list(taxonomy) or list(DEFAULT_SCRIPT_CATEGORIES)
+
+        category_files = discover_category_files(INDEX_DIR, available_categories, taxonomy=taxonomy)
         category_snippets = {name: read_snippet([path]) for name, path in category_files.items()}
-        category = classify_with_llm(prompt, category_snippets) or choose_category(prompt, category_snippets)
+        category = classify_with_llm(prompt, category_snippets, categories=available_categories) or choose_category(
+            prompt, category_snippets, categories=available_categories
+        )
+
+        section_snippet = ""
+        subcategory: str | None = None
+        if category in taxonomy:
+            sub_paths = taxonomy.get(category, [])
+            sub_snippets = {
+                (sub_path.stem if sub_path.is_file() else sub_path.name): read_snippet([sub_path]) for sub_path in sub_paths
+            }
+            subcategory = choose_subcategory(prompt, sub_snippets)
+            if subcategory:
+                section_snippet = sub_snippets.get(subcategory, "")
+            elif sub_snippets:
+                subcategory = next(iter(sub_snippets))
+                section_snippet = sub_snippets.get(subcategory, "")
+        else:
+            section_snippet = category_snippets.get(category, "")
 
         common_candidates = [INDEX_DIR / name for name in COMMON_FILES] + [INDEX_DIR / (name + ".txt") for name in COMMON_FILES]
+        knowledge_candidates = [MYBRAIN_DIR] + common_candidates
         common_text = read_snippet(common_candidates)
+        knowledge_text = read_snippet(knowledge_candidates)
 
         slug = _slugify(prompt)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -1382,6 +1486,7 @@ def generate_blogs(prompt: str, output_dir: Path = DEFAULT_OUTPUT_DIR) -> dict[s
         packs = get_language_packs()
         results: dict[str, object] = {
             "category": category,
+            "subcategory": subcategory or "",
             "flag": "FLAG:FILES_SENT",
             "slug": slug,
             "files": {},
@@ -1396,6 +1501,9 @@ def generate_blogs(prompt: str, output_dir: Path = DEFAULT_OUTPUT_DIR) -> dict[s
                 category=category,
                 common_text=common_text,
                 category_snippet=category_snippets.get(category, ""),
+                section_snippet=section_snippet,
+                knowledge_text=knowledge_text,
+                subcategory=subcategory,
             )
             output_path = output_dir / f"{slug}_{pack.code}.html"
             output_path.write_text(article_html, encoding="utf-8")
