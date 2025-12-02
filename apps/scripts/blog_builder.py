@@ -12,6 +12,7 @@ import argparse
 import contextlib
 import hashlib
 import html
+import json
 import os
 import re
 import textwrap
@@ -374,82 +375,186 @@ def _deterministic_numbers(prompt: str, count: int, scale: int) -> list[int]:
     return [n + 1 for n in numbers]
 
 
+def _next_chart_id(kind: str) -> str:
+    _next_chart_id.counter += 1
+    return f"{kind}_chart_{_next_chart_id.counter}"
+
+
+_next_chart_id.counter = 0
+
+
 def build_bar_chart(values: list[int], labels: list[str], *, title: str, caption: str, aria_label: str) -> str:
-    max_val = max(values) if values else 1
-    width = 500
-    height = 200
-    bar_width = width // max(len(values), 1)
-    bars = []
-    for i, value in enumerate(values):
-        bar_height = int((value / max_val) * (height - 30))
-        x = i * bar_width + 10
-        y = height - bar_height - 20
-        bars.append(
-            f'<rect x="{x}" y="{y}" width="{bar_width - 20}" height="{bar_height}" fill="#7f5af0" />'
-            f'<text x="{x + (bar_width - 20) / 2}" y="{height - 5}" font-size="12" text-anchor="middle" fill="#16161a">{html.escape(labels[i])}</text>'
-        )
+    canvas_id = _next_chart_id("bar")
+    data_json = json.dumps(values)
+    labels_json = json.dumps(labels)
+    script = f"""
+<script>
+(() => {{
+  const canvas = document.getElementById('{canvas_id}');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const values = {data_json};
+  const labels = {labels_json};
+  const width = canvas.width;
+  const height = canvas.height;
+  const padding = 40;
+  const barWidth = (width - padding * 2) / Math.max(values.length, 1);
+  const maxVal = Math.max(...values, 1);
+  const gradient = ctx.createLinearGradient(0, 0, 0, height);
+  gradient.addColorStop(0, '#7f5af0');
+  gradient.addColorStop(1, '#2cb67d');
+
+  ctx.clearRect(0, 0, width, height);
+  ctx.fillStyle = '#0b1021';
+  ctx.fillRect(0, 0, width, height);
+  ctx.strokeStyle = '#94a1b2';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(padding, padding / 2);
+  ctx.lineTo(padding, height - padding);
+  ctx.lineTo(width - padding / 2, height - padding);
+  ctx.stroke();
+
+  values.forEach((value, idx) => {{
+    const scaled = (value / maxVal) * (height - padding * 1.5);
+    const x = padding + idx * barWidth + barWidth * 0.15;
+    const y = height - padding - scaled;
+    ctx.fillStyle = gradient;
+    ctx.roundRect(x, y, barWidth * 0.7, scaled, 6);
+    ctx.fill();
+    ctx.fillStyle = '#e4e4ef';
+    ctx.font = '12px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(labels[idx] || '', x + barWidth * 0.35, height - padding + 16);
+  }});
+}})();
+</script>
+"""
     return (
-        f"<figure><svg viewBox='0 0 {width} {height}' role='img' aria-label='{html.escape(aria_label)}'>"
-        f"<title>{html.escape(title)}</title>{''.join(bars)}</svg>"
-        f"<figcaption>{html.escape(caption)}</figcaption></figure>"
+        f"<figure aria-label='{html.escape(aria_label)}'>"
+        f"<figcaption>{html.escape(title)} — {html.escape(caption)}</figcaption>"
+        f"<canvas id='{canvas_id}' width='520' height='260' role='img' aria-label='{html.escape(title)}'></canvas>"
+        f"{script}</figure>"
     )
 
 
 def build_line_chart(values: list[int], labels: list[str], *, title: str, caption: str, aria_label: str) -> str:
-    width = 500
-    height = 220
-    if not values:
-        values = [1, 1, 1]
-    max_val = max(values)
-    points = []
-    step = width // max(len(values) - 1, 1)
-    for i, value in enumerate(values):
-        x = i * step
-        y = height - 20 - int((value / max_val) * (height - 40))
-        points.append(f"{x},{y}")
-    polyline = " ".join(points)
-    circles = [f"<circle cx='{p.split(',')[0]}' cy='{p.split(',')[1]}' r='4' fill='#2cb67d'/>" for p in points]
-    texts = [
-        f"<text x='{i * step}' y='{height - 5}' font-size='12' text-anchor='start' fill='#16161a'>{html.escape(label)}</text>"
-        for i, label in enumerate(labels)
-    ]
+    canvas_id = _next_chart_id("line")
+    data_json = json.dumps(values or [1, 1, 1])
+    labels_json = json.dumps(labels)
+    script = f"""
+<script>
+(() => {{
+  const canvas = document.getElementById('{canvas_id}');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const values = {data_json};
+  const labels = {labels_json};
+  const width = canvas.width;
+  const height = canvas.height;
+  const padding = 40;
+  const stepX = (width - padding * 2) / Math.max(values.length - 1, 1);
+  const maxVal = Math.max(...values, 1);
+
+  ctx.clearRect(0, 0, width, height);
+  ctx.fillStyle = '#0b1021';
+  ctx.fillRect(0, 0, width, height);
+  ctx.strokeStyle = '#94a1b2';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(padding, padding / 2);
+  ctx.lineTo(padding, height - padding);
+  ctx.lineTo(width - padding / 2, height - padding);
+  ctx.stroke();
+
+  ctx.strokeStyle = '#2cb67d';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  values.forEach((value, idx) => {{
+    const x = padding + idx * stepX;
+    const y = height - padding - (value / maxVal) * (height - padding * 1.5);
+    if (idx === 0) {{
+      ctx.moveTo(x, y);
+    }} else {{
+      ctx.lineTo(x, y);
+    }}
+  }});
+  ctx.stroke();
+
+  ctx.fillStyle = '#ff8906';
+  values.forEach((value, idx) => {{
+    const x = padding + idx * stepX;
+    const y = height - padding - (value / maxVal) * (height - padding * 1.5);
+    ctx.beginPath();
+    ctx.arc(x, y, 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#e4e4ef';
+    ctx.font = '12px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(labels[idx] || '', x, height - padding + 16);
+    ctx.fillStyle = '#ff8906';
+  }});
+}})();
+</script>
+"""
     return (
-        f"<figure><svg viewBox='0 0 {width} {height}' role='img' aria-label='{html.escape(aria_label)}'>"
-        f"<title>{html.escape(title)}</title><polyline fill='none' stroke='#2cb67d' stroke-width='3' points='{polyline}'/>"
-        f"{''.join(circles)}{''.join(texts)}</svg>"
-        f"<figcaption>{html.escape(caption)}</figcaption></figure>"
+        f"<figure aria-label='{html.escape(aria_label)}'>"
+        f"<figcaption>{html.escape(title)} — {html.escape(caption)}</figcaption>"
+        f"<canvas id='{canvas_id}' width='520' height='280' role='img' aria-label='{html.escape(title)}'></canvas>"
+        f"{script}</figure>"
     )
 
 
 def build_pie_chart(values: list[int], labels: list[str], *, title: str, caption: str, aria_label: str) -> str:
-    total = sum(values) or 1
-    radius = 80
-    cx = cy = 100
-    start_angle = 0.0
-    slices = []
-    colors = ["#7f5af0", "#2cb67d", "#ff8906", "#e53170", "#94a1b2", "#0f0"]
-    for i, (value, label) in enumerate(zip(values, labels)):
-        angle = (value / total) * 360
-        end_angle = start_angle + angle
-        x1 = cx + radius * _cos_deg(start_angle)
-        y1 = cy + radius * _sin_deg(start_angle)
-        x2 = cx + radius * _cos_deg(end_angle)
-        y2 = cy + radius * _sin_deg(end_angle)
-        large_arc = 1 if angle > 180 else 0
-        path_d = (
-            f"M {cx},{cy} L {x1},{y1} A {radius},{radius} 0 {large_arc} 1 {x2},{y2} Z"
-        )
-        color = colors[i % len(colors)]
-        slices.append(
-            f"<path d='{path_d}' fill='{color}' stroke='#16161a' stroke-width='1' />"
-            f"<text x='{cx + radius + 20}' y='{20 + i * 18}' font-size='12' fill='#16161a'>{html.escape(label)} ({value})</text>"
-        )
-        start_angle = end_angle
+    canvas_id = _next_chart_id("pie")
+    data_json = json.dumps(values)
+    labels_json = json.dumps(labels)
+    script = f"""
+<script>
+(() => {{
+  const canvas = document.getElementById('{canvas_id}');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const values = {data_json};
+  const labels = {labels_json};
+  const total = values.reduce((sum, v) => sum + v, 0) || 1;
+  const radius = Math.min(canvas.width, canvas.height) / 2 - 10;
+  const cx = canvas.width / 2;
+  const cy = canvas.height / 2;
+  const palette = ['#7f5af0', '#2cb67d', '#ff8906', '#e53170', '#94a1b2', '#0ea5e9'];
+
+  let start = -Math.PI / 2;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = '#0b1021';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  values.forEach((value, idx) => {{
+    const slice = (value / total) * Math.PI * 2;
+    const end = start + slice;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.arc(cx, cy, radius, start, end);
+    ctx.closePath();
+    ctx.fillStyle = palette[idx % palette.length];
+    ctx.fill();
+
+    const mid = start + slice / 2;
+    const lx = cx + Math.cos(mid) * (radius + 18);
+    const ly = cy + Math.sin(mid) * (radius + 18);
+    ctx.fillStyle = '#e4e4ef';
+    ctx.font = '12px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(labels[idx] || '', lx, ly);
+    start = end;
+  }});
+}})();
+</script>
+"""
     return (
-        f"<figure><svg viewBox='0 0 260 200' role='img' aria-label='{html.escape(aria_label)}'>"
-        f"<title>{html.escape(title)}</title>"
-        f"{''.join(slices)}</svg>"
-        f"<figcaption>{html.escape(caption)}</figcaption></figure>"
+        f"<figure aria-label='{html.escape(aria_label)}'>"
+        f"<figcaption>{html.escape(title)} — {html.escape(caption)}</figcaption>"
+        f"<canvas id='{canvas_id}' width='320' height='240' role='img' aria-label='{html.escape(title)}'></canvas>"
+        f"{script}</figure>"
     )
 
 
@@ -680,13 +785,7 @@ def generate_sections(
                 labels=labels,
                 chart_title=chart_title,
             )
-            chart_note = explain_chart_with_llm(
-                values,
-                labels,
-                theme,
-                pack,
-                chart_title=chart_title,
-            )
+            chart_note = ""
 
             sections.append(
                 Section(
@@ -716,13 +815,11 @@ def compose_html(title: str, description: str, intro: str, sections: list[Sectio
         body_parts.append(f"<h2>{html.escape(section.heading)}</h2>")
         body_parts.append(f"<p>{html.escape(section.body)}</p>")
         body_parts.append(section.diagram_html)
-        body_parts.append(f"<p class='chart-note'>{html.escape(section.chart_note)}</p>")
+        if section.chart_note.strip():
+            body_parts.append(f"<p class='chart-note'>{html.escape(section.chart_note)}</p>")
     body_parts.append(f"<h2>Outro</h2><p>{html.escape(outro)}</p>")
 
     html_doc = "\n".join(body_parts)
-    if len(html_doc) < 10000:
-        padding = "<p>" + html.escape(padding_phrase * ((10000 - len(html_doc)) // len(padding_phrase) + 1)) + "</p>"
-        html_doc += padding
     return "<article>" + html_doc + "</article>"
 
 
