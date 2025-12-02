@@ -117,7 +117,7 @@ def get_language_packs() -> list[LanguagePack]:
             ],
             section_body_template=(
                 "From Yohane's perspective, this piece examines the hidden challenges in {category}. By focusing on {theme},"
-                " it holds together punk urgency and cold rationality. Anchored on the client theme '{prompt}', it layers European"
+                " it holds together punk urgency and cold rationality. It layers European"
                 " geopolitics, dollar hegemony, and decentralized tech progress. The goal is a frame to think for yourself, not"
                 " to be swept away by hype. Late-night charts in a café, the unease of volatility, and the trio of data, story,"
                 " and risk design all converge to accompany readers who share the same dissonance."
