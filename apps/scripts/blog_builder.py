@@ -1,257 +1,68 @@
-"""Generate persona-focused HTML blogs from client prompts.
-
-The article builder now follows a five-step pipeline aligned to the client
-brief:
-
-1. Extract categories and subcategories from ``indexes/articles`` using an LLM
-   classifier.
-2. Pull section text that best matches the client prompt from the chosen
-   category/subcategory.
-3. Merge that section text with knowledge files under ``indexes/mybrain`` and
-   craft a ~2,000-character summary with translations.
-4. Render supplemental rich HTML diagrams (with JavaScript) based on the same
-   context.
-5. Conclude every article with a dedicated "総論" section that recaps steps 1–4.
 """
+高速化版 Persona ブログ生成スクリプト（STATUS_REPORTER 対応版、図解付き）
+
+・/var/www/Meta-Project/indexes/articles からカテゴリを検出
+・クライアントの文章を LLM でカテゴリ分類
+・該当カテゴリがなければ NO_CATEGORY を返して終了
+・カテゴリ配下のインデックスファイルと /indexes/mybrain 配下の知識ファイルを使用
+・7 セクション（各 ~1500 文字を目安） + 総論
+・各セクションごとに「図解」テキストを生成して HTML に出力
+・末尾に タイトル / ディスクリプション(200文字) / タグ6つ(ビッグ2,普通2,スモール2)
+
+制約（読者向け出力）:
+- 本文・図解・タイトル・ディスクリプション・タグに
+  「インデックス」「クライアント」という語を出さない。
+- LLM に「(注: …」「(注2: …」のようなメタ注記を書かせない。
+  万一混入しても後処理で削除する。
+"""
+
 from __future__ import annotations
 
 import argparse
 import contextlib
-import hashlib
 import html
 import json
 import os
 import re
 import textwrap
-import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Mapping
+from typing import Any, Mapping
+import threading
 
 import requests
+
+
+# ======================= 設定 ================================
 
 BASE_DIR = Path("/var/www/Meta-Project")
 INDEX_DIR = BASE_DIR / "indexes"
 ARTICLES_DIR = INDEX_DIR / "articles"
 MYBRAIN_DIR = INDEX_DIR / "mybrain"
 DEFAULT_OUTPUT_DIR = Path("/mnt/hgfs/output")
+
+# Ollama 等の LLM エンドポイント
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate")
-LLM_TIMEOUT = int(os.environ.get("LLM_TIMEOUT", "120"))
-MIN_SECTION_CHARS = int(os.environ.get("MIN_SECTION_CHARS", "600"))
-MAIN_SECTION_TARGET_CHARS = int(os.environ.get("MAIN_SECTION_TARGET_CHARS", "2000"))
-MAX_ARTICLE_CHARS = int(os.environ.get("MAX_ARTICLE_CHARS", "2600"))
-LLM_MAX_TOKENS = int(os.environ.get("LLM_MAX_TOKENS", "900"))
+LLM_TIMEOUT = int(os.environ.get("LLM_TIMEOUT", "600"))
+
 SECTION_MODEL = os.environ.get("BLOG_BUILDER_SECTION_MODEL", "phi3:mini")
 CLASSIFIER_MODEL = os.environ.get("BLOG_BUILDER_CLASSIFIER_MODEL", "phi3:mini")
-ENABLE_CHART_LLM = os.environ.get("BLOG_BUILDER_CHART_LLM", "0") == "1"
-WARM_MODELS = os.environ.get("BLOG_BUILDER_WARM_MODELS", "0") == "1"
-CHART_MODEL = os.environ.get("BLOG_BUILDER_CHART_MODEL", SECTION_MODEL)
+
+MIN_SECTION_CHARS = 1500
+SUMMARY_TARGET_CHARS = 1500
+
 LLM_CALL_COUNT = 0
-DEFAULT_SCRIPT_CATEGORIES = [
-    "Web3",
-    "NFT",
-    "Cryptocurrency",
-    "DeFi",
-    "Blockchain & Cryptocurrency Security",
-    "Cybersecurity",
-    "Hacking",
-    "Geopolitics",
-    "Mental Health",
-    "Dystopian",
-]
-COMMON_FILES = ["mybrain", "catholic", "bible", "berkshire"]
 
 
-def persona_name(pack: "LanguagePack") -> str:
-    # ヨハネは英語では John にする
-    return "John" if pack.code == "en" else "Yohane"
-
-
-@dataclass
-class LanguagePack:
-    code: str
-    title_template: str
-    description: str
-    intro: str
-    themes: list[str]
-    section_body_template: str
-    context_line: str
-    summary_heading: str
-    main_heading: str
-    chart_labels: dict[str, list[str]]
-    chart_titles: dict[str, str]
-    chart_captions: dict[str, str]
-    outro_lines: list[str]
-    padding_phrase: str
-
-
-def get_language_packs() -> list[LanguagePack]:
-    return [
-        LanguagePack(
-            code="ja",
-            title_template="{category}で世界のバグを解体する夜",
-            description="リスクと静けさを両立させたいヨハネに向けた、現実と物語の橋渡し。",
-            intro="哲学者気取りのヨハネのまなざしで、与えられたテーマを批判的に分解する長文ブログ。",
-            themes=[
-                "市場とテクノロジーの歪さを読み解く",
-                "リスクとリターンのバランス設計",
-                "コミュニティと倫理の接点",
-                "個人メンタルと情報ダイエット",
-                "アートと物語への投資戦略",
-                "未来への問いと実装ロードマップ",
-            ],
-            section_body_template=(
-                "哲学者気取りのヨハネの視点から、{category}領域に潜む課題を具体的に検証する。{theme}という切り口で、"
-                "世界のバグを見抜こうとする冷静さと、パンクな衝動が同居する。{context}ヨハネが夜のカフェでチャートを"
-                "眺めながら感じる虚無感を、データ、ストーリー、リスク設計という3本柱で受け止め、同じ違和感を持つ"
-                "読者に静かな伴走を提供する。"
-            ),
-            context_line=(
-                "与えられたテーマを軸に、欧州の地政学リスク、ドル覇権、分散型テクノロジーの進化を重ね合わせ、"
-                "盲目的な熱狂ではなく自分で考え抜くためのフレームを組み立てる。"
-            ),
-            summary_heading="夜の余韻と着地",
-            main_heading="夜更けの分解ノート",
-            chart_labels={
-                "bar": ["技術", "市場", "文化"],
-                "line": ["短期", "中期", "長期", "その先"],
-                "pie": ["倫理", "経済", "創造"],
-            },
-            chart_titles={
-                "bar": "関心強度の棒グラフ",
-                "line": "リスク認識の推移",
-                "pie": "意思決定の内訳",
-            },
-            chart_captions={
-                "bar": "ヨハネの関心の強さを示す仮想データ。",
-                "line": "時間とともに変動するリスク認識をモデル化。",
-                "pie": "精神・経済・倫理のバランス感覚を擬似データで可視化。",
-            },
-            outro_lines=[
-                "世界が揺らいでも、盲目的な信仰に逃げ込まない態度こそが次の実験を開く。",
-                "Rahabのステージは、批判も迷いも歓迎するサンドボックスであるべきだ。",
-                "だからこそ、疑い続けることと信じてみることの両立を手放さないでほしい。",
-            ],
-            padding_phrase="ヨハネの内省を深掘りし、同じ問いを持つ読者に長文で伴走する。",
-        ),
-        LanguagePack(
-            code="en",
-            title_template="Dissecting the world's glitches through {category}",
-            description="A bridge between reality and narrative for John, balancing risk with quiet focus.",
-            intro="From John's restless yet analytical gaze, this article deconstructs the theme without blind hype.",
-            themes=[
-                "Reading the distortions of markets and technology",
-                "Designing the balance of risk and return",
-                "Where community meets ethics",
-                "Mental health and information fasting",
-                "Investing in art and narrative",
-                "Questions for the future and a working roadmap",
-            ],
-            section_body_template=(
-                "From John's perspective, this piece examines the hidden challenges in {category}. By focusing on {theme},"
-                " it holds together punk urgency and cold rationality. {context} Late-night charts in a café, the unease of"
-                " volatility, and the trio of data, story, and risk design all converge to accompany readers who share the"
-                " same dissonance."
-            ),
-            context_line=(
-                "It layers European geopolitics, dollar hegemony, and decentralized tech progress to offer a thinking frame"
-                " that resists blind hype."
-            ),
-            summary_heading="Late-night wrap",
-            main_heading="Midnight teardown",
-            chart_labels={
-                "bar": ["Tech", "Markets", "Culture"],
-                "line": ["Short", "Mid", "Long", "Beyond"],
-                "pie": ["Ethics", "Economy", "Creation"],
-            },
-            chart_titles={
-                "bar": "Interest intensity",
-                "line": "Risk perception over time",
-                "pie": "How decisions are weighted",
-            },
-            chart_captions={
-                "bar": "Imaginary distribution of John's focus across domains.",
-                "line": "A modeled curve of how risk perception moves with time.",
-                "pie": "A synthetic balance among ethics, economy, and creativity.",
-            },
-            outro_lines=[
-                "Even when the world shakes, refusing blind faith opens the next experiment.",
-                "Rahab's stage should stay a sandbox that welcomes both doubt and critique.",
-                "Keep holding both skepticism and the courage to believe—at the same time.",
-            ],
-            padding_phrase="John keeps unpacking his unease, walking readers through long-form reflection.",
-        ),
-        LanguagePack(
-            code="it",
-            title_template="Smontare i bug del mondo con {category}",
-            description="Un ponte tra realtà e narrazione per Yohane, in equilibrio tra rischio e quiete.",
-            intro="Con lo sguardo inquieto ma analitico di Yohane, questo articolo smonta il tema senza farsi trascinare dall'hype.",
-            themes=[
-                "Leggere le distorsioni di mercato e tecnologia",
-                "Progettare l'equilibrio tra rischio e ritorno",
-                "Dove comunità ed etica si toccano",
-                "Salute mentale e dieta informativa",
-                "Investire in arte e narrazione",
-                "Domande sul futuro e roadmap di lavoro",
-            ],
-            section_body_template=(
-                "Dal punto di vista di Yohane, esploriamo le sfide nascoste in {category}. Con {theme} come lente,"
-                " convivono urgenza punk e razionalità fredda. {context} I grafici notturni al caffè, l'inquietudine della"
-                " volatilità e il trio dati-narrazione-design del rischio guidano i lettori con la stessa dissonanza."
-            ),
-            context_line=(
-                "Intreccia geopolitica europea, egemonia del dollaro e progresso delle tecnologie decentralizzate per"
-                " costruire un frame di pensiero autonomo lontano dall'entusiasmo cieco."
-            ),
-            summary_heading="Chiusura notturna",
-            main_heading="Smontaggio di mezzanotte",
-            chart_labels={
-                "bar": ["Tecnologia", "Mercati", "Cultura"],
-                "line": ["Breve", "Medio", "Lungo", "Oltre"],
-                "pie": ["Etica", "Economia", "Creazione"],
-            },
-            chart_titles={
-                "bar": "Intensità dell'interesse",
-                "line": "Percezione del rischio nel tempo",
-                "pie": "Composizione delle decisioni",
-            },
-            chart_captions={
-                "bar": "Distribuzione immaginaria dell'attenzione di Yohane tra i domini.",
-                "line": "Una curva modellata di come cambia la percezione del rischio.",
-                "pie": "Bilanciamento sintetico tra etica, economia e creatività.",
-            },
-            outro_lines=[
-                "Anche quando il mondo trema, rifiutare la fede cieca apre il prossimo esperimento.",
-                "Il palco di Rahab deve restare un sandbox che accoglie dubbio e critica.",
-                "Continua a tenere insieme scetticismo e coraggio di credere, allo stesso tempo.",
-            ],
-            padding_phrase="Yohane approfondisce la sua inquietudine accompagnando i lettori con una lunga riflessione.",
-        ),
-    ]
-
-
-PERSONA = textwrap.dedent(
-    """
-    ペルソナ: 哲学者気取りのヨハネ（25歳、北イタリア在住のFintech系エンジニア）
-    - 感情の波が大きく、合理性と虚無感の間を揺れる。
-    - Web3/NFT/DeFi/AIなどの前衛技術と、世界の歪さへの哲学的違和感を持つ。
-    - パンクロックやサイバーパンク的アートに惹かれ、リスクとリターンのバランスを常に探っている。
-    - 盲目的な信仰を避け、自分で考え抜いた上で頼れる拠りどころを模索している。
-    """
-)
-
-
-@dataclass
-class Section:
-    heading: str
-    body: str
-    diagram_html: str
-    chart_note: str
+# ======================= ステータスレポート ===================
 
 
 class StatusReporter:
-    """Periodically records the active program/function for clients."""
+    """定期的に現在の処理状況を記録する簡易機構。
+
+    blog_server.py から STATUS_REPORTER.pop_messages(...) が呼ばれる想定。
+    """
 
     def __init__(self, *, interval_seconds: int = 300) -> None:
         self.interval_seconds = interval_seconds
@@ -294,6 +105,7 @@ STATUS_REPORTER = StatusReporter()
 
 @contextlib.contextmanager
 def status_scope(function_name: str, *, program: str = "blog_builder", file: str = __file__):
+    """generate_blogs 内部などで使用するためのコンテキストマネージャ。"""
     STATUS_REPORTER.update(program=program, function=function_name, file=file)
     try:
         yield
@@ -301,1176 +113,780 @@ def status_scope(function_name: str, *, program: str = "blog_builder", file: str
         STATUS_REPORTER.update(program=program, function="idle", file=file)
 
 
-def _post_llm(model: str, prompt: str, *, system: str | None = None, track_call: bool = True) -> str:
+# ======================= LLM ラッパ ==========================
+
+
+def _post_llm(model: str, prompt: str, *, system: str | None = None) -> str:
+    """Ollama / ローカル LLM への単発呼び出し。"""
     global LLM_CALL_COUNT
-    if track_call:
-        LLM_CALL_COUNT += 1
-    payload: dict[str, object] = {
+    LLM_CALL_COUNT += 1
+
+    payload: dict[str, Any] = {
         "model": model,
         "prompt": prompt,
         "stream": False,
     }
-    if LLM_MAX_TOKENS:
-        payload["options"] = {"num_predict": LLM_MAX_TOKENS}
     if system:
         payload["system"] = system
 
     try:
-        response = requests.post(OLLAMA_URL, json=payload, timeout=LLM_TIMEOUT)
-        response.raise_for_status()
-        data = response.json()
+        resp = requests.post(OLLAMA_URL, json=payload, timeout=LLM_TIMEOUT)
+        resp.raise_for_status()
+        data = resp.json()
         return str(data.get("response", "")).strip()
     except Exception as exc:  # noqa: BLE001
         return f"[LLM error: {exc}]"
-
-
-def warm_model(model: str) -> None:
-    with status_scope(f"warm_model:{model}"):
-        _post_llm(model, prompt="warmup ping", track_call=False)
-
-
-# === ここから PDF 対策入りの read_snippet =====================================
-
-def read_snippet(path_candidates: Iterable[Path]) -> str:
-    """Return concatenated snippets from available files or directories.
-
-    - index_dir の直下またはサブディレクトリから、テキストとして読めそうなものを少数選んで結合。
-    - PDF 本体（.pdf）や内容が `%PDF-1.x` で始まるようなものはスキップ。
-    - PDF→TXT 変換されたファイルに `%PDF-1.x ... %%EOF` 断片が残っている場合も、
-      後段の `_clean_text` でまとめて削除する。
-    """
-
-    def _safe_read_text(path: Path) -> str:
-        """PDFや明らかなバイナリを弾きつつUTF-8で読む小ヘルパー。"""
-        # 拡張子が .pdf なら即スキップ
-        if path.suffix.lower() == ".pdf":
-            return ""
-
-        try:
-            with path.open("rb") as f:
-                head = f.read(2048)
-                # PDFシグネチャを検出したらこのファイルは完全に無視
-                if b"%PDF-" in head[:1024]:
-                    return ""
-                rest = f.read()
-        except OSError:
-            return ""
-
-        data = head + rest
-        # UTF-8 として読みつつ、壊れているところは置換
-        return data.decode("utf-8", errors="replace")
-
-    snippets: list[str] = []
-    for path in path_candidates:
-        if path.is_file():
-            text = _safe_read_text(path)
-            if text:
-                snippets.append(text)
-            continue
-
-        if path.is_dir():
-            try:
-                # 大きくなりすぎないよう、各ディレクトリの最初の数件だけ読む
-                for child in sorted(path.iterdir())[:5]:
-                    if child.is_file():
-                        text = _safe_read_text(child)
-                        if text:
-                            snippets.append(text)
-            except OSError:
-                continue
-
-    # まとめたテキストを一括でクリーンアップ
-    return _clean_text("\n\n".join(snippets))
-
-
-# =======================================================================
-
-
-def collect_section_snippet(index_dir: Path, theme: str, *, limit: int = 3) -> str:
-    """Collect snippet text for a theme by scanning the index directory.
-
-    The theme is split into lightweight tokens and used to pick a small number
-    of matching files or directories under ``index_dir``. The function limits
-    traversal to avoid expensive walks.
-    """
-
-    tokens = [token.lower() for token in re.split(r"[^\w]+", theme) if token]
-    if not tokens or not index_dir.exists():
-        return ""
-
-    candidates: list[Path] = []
-    for path in sorted(index_dir.iterdir()):
-        name = (path.stem if path.is_file() else path.name).lower()
-        if any(token in name for token in tokens):
-            candidates.append(path)
-        if len(candidates) >= limit:
-            break
-
-    return read_snippet(candidates)
-
-
-def discover_category_files(
-    index_dir: Path, categories: Iterable[str], *, taxonomy: Mapping[str, list[Path]] | None = None
-) -> Mapping[str, Path]:
-    """Map canonical category names to existing files under the index directory."""
-
-    mapping: dict[str, Path] = {}
-    if taxonomy:
-        for name in categories:
-            if name in taxonomy:
-                mapping[name] = ARTICLES_DIR / name
-
-    if not index_dir.exists():
-        return mapping
-
-    for path in index_dir.iterdir():
-        candidate_name = path.stem if path.is_file() else path.name
-        for name in categories:
-            normalized = name.lower().replace(" & ", " ")
-            if candidate_name.lower().startswith(normalized):
-                mapping.setdefault(name, path)
-                break
-    return mapping
-
-
-def discover_article_taxonomy(articles_dir: Path) -> Mapping[str, list[Path]]:
-    """Return a mapping of categories to available subcategory paths."""
-
-    taxonomy: dict[str, list[Path]] = {}
-    if not articles_dir.exists():
-        return taxonomy
-
-    for category_path in sorted(articles_dir.iterdir()):
-        if category_path.is_dir():
-            subs = [child for child in sorted(category_path.iterdir()) if child.exists()]
-            taxonomy[category_path.name] = subs
-        elif category_path.is_file():
-            taxonomy.setdefault(category_path.stem, []).append(category_path)
-    return taxonomy
-
-
-def choose_category(prompt: str, category_snippets: Mapping[str, str], *, categories: Iterable[str]) -> str:
-    """Choose the best matching category based on keyword overlap."""
-
-    normalized = prompt.lower()
-    selected_categories = list(categories) or list(category_snippets)
-    scores: dict[str, int] = {}
-    for category in selected_categories:
-        snippet = category_snippets.get(category, "")
-        score = 0
-        for token in category.lower().split():
-            if token and token in normalized:
-                score += 2
-        for token in set(snippet.lower().split()):
-            if token in normalized:
-                score += 1
-        scores[category] = score
-
-    if not scores:
-        return "Web3"
-    best = max(scores, key=scores.get)
-    if scores[best] == 0:
-        return "Web3"
-    return best
-
-
-def classify_with_llm(
-    prompt: str, category_snippets: Mapping[str, str], *, categories: Iterable[str] | None = None
-) -> str | None:
-    """Use the LLM once to propose a category based on provided snippets."""
-
-    categories = list(categories or category_snippets)
-    category_list = "\n".join(f"- {name}" for name in categories)
-    snippets = "\n".join(
-        f"{name}: {category_snippets.get(name, '')[:800]}" for name in categories
-    )
-    system = (
-        "あなたは分類器です。以下のカテゴリ一覧から最も近い1つを日本語で返してください。"
-        "カテゴリ名のみを返し、説明文は不要です。"
-    )
-    prompt_body = textwrap.dedent(
-        f"""
-        クライアントからの文章:
-        {prompt}
-
-        利用可能なカテゴリ:
-        {category_list}
-
-        参考スニペット:
-        {snippets or '（スニペットなし）'}
-        """
-    )
-    llm_answer = _post_llm(CLASSIFIER_MODEL, prompt_body, system=system)
-    if not llm_answer:
-        return None
-
-    for name in categories:
-        if name.lower() in llm_answer.lower():
-            return name
-    return None
-
-
-def choose_subcategory(prompt: str, sub_snippets: Mapping[str, str]) -> str | None:
-    if not sub_snippets:
-        return None
-
-    categories = list(sub_snippets)
-    return classify_with_llm(prompt, sub_snippets, categories=categories) or choose_category(
-        prompt, sub_snippets, categories=categories
-    )
-
-
-def _deterministic_numbers(prompt: str, count: int, scale: int) -> list[int]:
-    digest = hashlib.sha256(prompt.encode("utf-8", errors="ignore")).digest()
-    numbers = [b % scale for b in digest[:count]]
-    return [n + 1 for n in numbers]
-
-
-def _next_chart_id(kind: str) -> str:
-    _next_chart_id.counter += 1
-    return f"{kind}_chart_{_next_chart_id.counter}"
-
-
-_next_chart_id.counter = 0
-
-
-def build_bar_chart(values: list[int], labels: list[str], *, title: str, caption: str, aria_label: str) -> str:
-    canvas_id = _next_chart_id("bar")
-    data_json = json.dumps(values)
-    labels_json = json.dumps(labels)
-    script = f"""
-<script>
-(() => {{
-  const canvas = document.getElementById('{canvas_id}');
-  if (!canvas) return;
-  const ctx = canvas.getContext('2d');
-  const values = {data_json};
-  const labels = {labels_json};
-  const clampLabel = (text) => {{
-    const normalized = String(text ?? '');
-    return normalized.length > 12 ? normalized.slice(0, 12) + '…' : normalized;
-  }};
-  const width = canvas.width;
-  const height = canvas.height;
-  const padding = 40;
-  const barWidth = (width - padding * 2) / Math.max(values.length, 1);
-  const maxVal = Math.max(...values, 1);
-  const gradient = ctx.createLinearGradient(0, 0, 0, height);
-  gradient.addColorStop(0, '#7f5af0');
-  gradient.addColorStop(1, '#2cb67d');
-
-  ctx.clearRect(0, 0, width, height);
-  ctx.fillStyle = '#0b1021';
-  ctx.fillRect(0, 0, width, height);
-  ctx.strokeStyle = '#94a1b2';
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(padding, padding / 2);
-  ctx.lineTo(padding, height - padding);
-  ctx.lineTo(width - padding / 2, height - padding);
-  ctx.stroke();
-
-  values.forEach((value, idx) => {{
-    const scaled = (value / maxVal) * (height - padding * 1.5);
-    const x = padding + idx * barWidth + barWidth * 0.15;
-    const y = height - padding - scaled;
-    ctx.fillStyle = gradient;
-    ctx.roundRect(x, y, barWidth * 0.7, scaled, 6);
-    ctx.fill();
-    ctx.fillStyle = '#e4e4ef';
-    ctx.font = '12px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText(clampLabel(labels[idx]), x + barWidth * 0.35, height - padding + 16);
-  }});
-}})();
-</script>
-"""
-    return (
-        f"<figure aria-label='{html.escape(aria_label)}' style='text-align:center;'>"
-        f"<figcaption>{html.escape(title)} — {html.escape(caption)}</figcaption>"
-        f"<canvas id='{canvas_id}' width='520' height='260' role='img' aria-label='{html.escape(title)}' "
-        f"style='display:block;margin:0 auto;'></canvas>"
-        f"{script}</figure>"
-    )
-
-
-def build_line_chart(values: list[int], labels: list[str], *, title: str, caption: str, aria_label: str) -> str:
-    canvas_id = _next_chart_id("line")
-    data_json = json.dumps(values or [1, 1, 1])
-    labels_json = json.dumps(labels)
-    script = f"""
-<script>
-(() => {{
-  const canvas = document.getElementById('{canvas_id}');
-  if (!canvas) return;
-  const ctx = canvas.getContext('2d');
-  const values = {data_json};
-  const labels = {labels_json};
-  const clampLabel = (text) => {{
-    const normalized = String(text ?? '');
-    return normalized.length > 12 ? normalized.slice(0, 12) + '…' : normalized;
-  }};
-  const width = canvas.width;
-  const height = canvas.height;
-  const padding = 40;
-  const stepX = (width - padding * 2) / Math.max(values.length - 1, 1);
-  const maxVal = Math.max(...values, 1);
-
-  ctx.clearRect(0, 0, width, height);
-  ctx.fillStyle = '#0b1021';
-  ctx.fillRect(0, 0, width, height);
-  ctx.strokeStyle = '#94a1b2';
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(padding, padding / 2);
-  ctx.lineTo(padding, height - padding);
-  ctx.lineTo(width - padding / 2, height - padding);
-  ctx.stroke();
-
-  ctx.strokeStyle = '#2cb67d';
-  ctx.lineWidth = 3;
-  ctx.beginPath();
-  values.forEach((value, idx) => {{
-    const x = padding + idx * stepX;
-    const y = height - padding - (value / maxVal) * (height - padding * 1.5);
-    if (idx === 0) {{
-      ctx.moveTo(x, y);
-    }} else {{
-      ctx.lineTo(x, y);
-    }}
-  }});
-  ctx.stroke();
-
-  ctx.fillStyle = '#ff8906';
-  values.forEach((value, idx) => {{
-    const x = padding + idx * stepX;
-    const y = height - padding - (value / maxVal) * (height - padding * 1.5);
-    ctx.beginPath();
-    ctx.arc(x, y, 5, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = '#e4e4ef';
-    ctx.font = '12px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText(clampLabel(labels[idx]), x, height - padding + 16);
-    ctx.fillStyle = '#ff8906';
-  }});
-}})();
-</script>
-"""
-    return (
-        f"<figure aria-label='{html.escape(aria_label)}' style='text-align:center;'>"
-        f"<figcaption>{html.escape(title)} — {html.escape(caption)}</figcaption>"
-        f"<canvas id='{canvas_id}' width='520' height='280' role='img' aria-label='{html.escape(title)}' "
-        f"style='display:block;margin:0 auto;'></canvas>"
-        f"{script}</figure>"
-    )
-
-
-def build_pie_chart(values: list[int], labels: list[str], *, title: str, caption: str, aria_label: str) -> str:
-    canvas_id = _next_chart_id("pie")
-    data_json = json.dumps(values)
-    labels_json = json.dumps(labels)
-    script = f"""
-<script>
-(() => {{
-  const canvas = document.getElementById('{canvas_id}');
-  if (!canvas) return;
-  const ctx = canvas.getContext('2d');
-  const values = {data_json};
-  const labels = {labels_json};
-  const clampLabel = (text) => {{
-    const normalized = String(text ?? '');
-    return normalized.length > 12 ? normalized.slice(0, 12) + '…' : normalized;
-  }};
-  const total = values.reduce((sum, v) => sum + v, 0) || 1;
-  const radius = Math.min(canvas.width, canvas.height) / 2 - 10;
-  const cx = canvas.width / 2;
-  const cy = canvas.height / 2;
-  const palette = ['#7f5af0', '#2cb67d', '#ff8906', '#e53170', '#94a1b2', '#0ea5e9'];
-
-  let start = -Math.PI / 2;
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = '#0b1021';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-  values.forEach((value, idx) => {{
-    const slice = (value / total) * Math.PI * 2;
-    const end = start + slice;
-    ctx.beginPath();
-    ctx.moveTo(cx, cy);
-    ctx.arc(cx, cy, radius, start, end);
-    ctx.closePath();
-    ctx.fillStyle = palette[idx % palette.length];
-    ctx.fill();
-
-    const mid = start + slice / 2;
-    const lx = cx + Math.cos(mid) * (radius + 18);
-    const ly = cy + Math.sin(mid) * (radius + 18);
-    ctx.fillStyle = '#e4e4ef';
-    ctx.font = '12px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText(clampLabel(labels[idx]), lx, ly);
-    start = end;
-  }});
-}})();
-</script>
-"""
-    return (
-        f"<figure aria-label='{html.escape(aria_label)}' style='text-align:center;'>"
-        f"<figcaption>{html.escape(title)} — {html.escape(caption)}</figcaption>"
-        f"<canvas id='{canvas_id}' width='320' height='240' role='img' aria-label='{html.escape(title)}' "
-        f"style='display:block;margin:0 auto;'></canvas>"
-        f"{script}</figure>"
-    )
-
-
-def _sin_deg(angle: float) -> float:
-    import math
-
-    return math.sin(math.radians(angle))
-
-
-def _cos_deg(angle: float) -> float:
-    import math
-
-    return math.cos(math.radians(angle))
 
 
 def _is_llm_error(text: str | None) -> bool:
     return not text or text.startswith("[LLM error")
 
 
-# === PDF 断片や文字化けを強めに掃除する _clean_text ==============================
+# ======================= テキストユーティリティ ==============
+
 
 def _clean_text(text: str) -> str:
-    """Remove garbled characters and collapse duplicate lines/sentences.
-
-    - 置換文字（�など）やBOMを削除
-    - インデックス内に紛れ込んだ PDF 生データ（%PDF-...〜%%EOF）を削除
-    - 連続する同一文を間引く
-    """
-
+    """HTML/PDF ノイズや宣伝行をざっくり除去してプレーンテキスト化。"""
     if not text:
         return ""
 
-    # BOM / 置換文字の除去
-    cleaned = text.replace("\ufeff", "")
-    cleaned = cleaned.replace("\ufffd", "")
+    cleaned = text.replace("\ufeff", "").replace("\ufffd", "")
     cleaned = re.sub(r"�+", "", cleaned)
 
-    # PDF 生データっぽい塊を削除（PDF→TXT でもそのまま残っていることがある）
-    cleaned = re.sub(
-        r"%PDF-\d\.\d[\s\S]*?(?:%%EOF|$)",
-        "",
-        cleaned,
-        flags=re.IGNORECASE,
-    )
+    # PDFブロック
+    cleaned = re.sub(r"%PDF-\d\.\d[\s\S]*?(?:%%EOF|$)", "", cleaned, flags=re.IGNORECASE)
 
-    # 段落ごとに分割し、連続する同一文を削る
-    paragraphs = [para.strip() for para in cleaned.split("\n")]
-    normalized_paragraphs: list[str] = []
-    for para in paragraphs:
-        if not para:
-            continue
-        sentences = re.split(r"(?<=[。.!?])\s+", para)
-        deduped: list[str] = []
-        for sentence in sentences:
-            stripped = sentence.strip()
-            if not stripped:
-                continue
-            if deduped and stripped == deduped[-1]:
-                continue
-            deduped.append(stripped)
-        normalized = " ".join(deduped)
-        if normalized_paragraphs and normalized == normalized_paragraphs[-1]:
-            continue
-        normalized_paragraphs.append(normalized)
+    # HTML 除去
+    cleaned = re.sub(r"(?is)<!DOCTYPE.*?>", " ", cleaned)
+    cleaned = re.sub(r"(?is)<head[^>]*>.*?</head>", " ", cleaned)
+    cleaned = re.sub(r"(?is)<script[^>]*>.*?</script>", " ", cleaned)
+    cleaned = re.sub(r"(?is)<style[^>]*>.*?</style>", " ", cleaned)
+    cleaned = re.sub(r"(?s)<[^>]+>", " ", cleaned)
 
-    collapsed = "\n".join(normalized_paragraphs)
-    collapsed = re.sub(r"\n{3,}", "\n\n", collapsed)
-    return collapsed.strip()
-
-
-# =======================================================================
-
-
-def _format_text_block(text: str) -> str:
-    escaped = html.escape(text)
-    return escaped.replace("\n", "<br />\n")
-
-
-def _ensure_minimum_length(
-    text: str, *, min_chars: int, padding_phrase: str, theme: str, category: str
-) -> str:
-    if len(text) >= min_chars:
-        return text
-
-    padding_lines = [
-        f"{padding_phrase} 見出し『{theme}』を起点に、{category}の現場で揺れる感情や数字を掘り下げる。",
-        f"ヨハネが夜のカフェでノートに書き殴る独白として、{theme}の違和感と実装プランを往復させる。",
-        f"パンクな疑いと静かな祈りを両立させながら、{category}をめぐる地政学・技術・倫理を丁寧に編み直す。",
-        f"{theme}という言葉が刺さる理由を、友人に語りかけるようなリズムで具体化し、読者の体験に重ねる。",
-        f"数字の裏側にある失敗談や小さな成功例を織り込み、{category}の未来を自分ごととして描き直す。",
+    # ナビ・宣伝っぽい行
+    nav_keywords = [
+        "skip to main content",
+        "navigation",
+        "privacy policy",
+        "terms and conditions",
+        "your account",
+        "sign in",
+        "sign out",
+        "contact us",
+    ]
+    promo_keywords = [
+        "binance",
+        "bybit",
+        "coinbase",
+        "bitfinex",
+        "bitflyer",
+        "okx",
+        "kucoin",
     ]
 
-    idx = 0
-    while len(text) < min_chars:
-        padding = padding_lines[idx % len(padding_lines)]
-        text = f"{text}\n{padding}"
-        idx += 1
-    return text
+    filtered: list[str] = []
+    for line in cleaned.splitlines():
+        ln = line.strip()
+        if not ln:
+            continue
+        low = ln.lower()
+
+        if any(k in low for k in nav_keywords):
+            continue
+        if any(k in low for k in promo_keywords):
+            continue
+
+        filtered.append(ln)
+
+    cleaned = "\n".join(filtered)
+
+    # 文レベルで重複除去（簡易）
+    paras = [p.strip() for p in cleaned.split("\n") if p.strip()]
+    normalized: list[str] = []
+    for para in paras:
+        sentences = re.split(r"(?<=[。．.!?])\s+|\s{2,}", para)
+        dedup: list[str] = []
+        for s in sentences:
+            s = s.strip()
+            if not s:
+                continue
+            if dedup and s == dedup[-1]:
+                continue
+            dedup.append(s)
+        joined = " ".join(dedup)
+        if normalized and joined == normalized[-1]:
+            continue
+        normalized.append(joined)
+
+    cleaned = "\n".join(normalized)
+    cleaned = re.sub(r"\s{3,}", "  ", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
 
 
-def _truncate_to_chars(text: str, *, limit: int) -> str:
-    if len(text) <= limit:
-        return text
-    if limit <= 0:
+def _sanitize_output_text(text: str) -> str:
+    """読者向けに出す本文などを最終整形する。
+
+    - _clean_text でノイズ除去
+    - (注: …) (注2: …) のようなメタ注記行を削除
+    - 「インデックス」「クライアント」という語を別語に差し替え
+    """
+    if not text:
         return ""
-    return text[: max(limit - 1, 0)].rstrip() + "…"
+    text = _clean_text(text)
+
+    lines: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("(注:") or stripped.startswith("（注:"):
+            continue
+        if stripped.startswith("(注2:") or stripped.startswith("（注2:"):
+            continue
+        lines.append(line)
+    text = "\n".join(lines)
+
+    # 読者には意味が伝わりづらい語を別表現に
+    text = text.replace("インデックス", "データソース")
+    text = text.replace("クライアント", "読者")
+
+    return text.strip()
 
 
-def _fallback_section_summary(
-    *,
-    prompt: str,
-    category: str,
-    theme: str,
-    pack: LanguagePack,
-    values: list[int],
-    labels: list[str],
-    category_snippet: str,
-    chart_title: str,
-) -> str:
-    snippet_hint = _clean_text(category_snippet[:200])
-    formatted_values = ", ".join(f"{label}:{value}" for label, value in zip(labels, values))
-    if pack.code == "ja":
-        return textwrap.dedent(
-            f"""
-            テーマ「{theme}」に沿って、{category}領域の論点を再構成する。
-            図「{chart_title}」のデータ（{formatted_values}）を手掛かりに、ヨハネは強弱の差からリスク配分を読み直す。
-            {pack.context_line}
-            パンクな疑いと静かな洞察を両立させ、見出し通りの論点に引き戻す。
-            """
-        ).strip()
+def read_snippet(path: Path, *, max_chars: int | None = None) -> str:
+    """ディレクトリ/ファイル配下のテキストを結合して返す（高速版）。
 
-    if pack.code == "it":
-        return textwrap.dedent(
-            f"""
-            Con il tema "{theme}" rilegge il quadro nel contesto {category}.
-            I dati del grafico "{chart_title}" ({formatted_values}) mostrano dove l'attenzione e il rischio cambiano intensità.
-            {pack.context_line}
-            Il tono resta sobrio e critico, così da rispettare titolo e diagramma。
-            """
-        ).strip()
+    max_chars を指定すると、その文字数を超えたところで打ち切る。
+    """
+    if not path.exists():
+        return ""
 
-    persona = persona_name(pack)
-    return textwrap.dedent(
+    texts: list[str] = []
+
+    if path.is_file():
+        try:
+            raw = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return ""
+        cleaned = _clean_text(raw)
+        if max_chars is not None:
+            return cleaned[:max_chars]
+        return cleaned
+
+    # ディレクトリの場合：深い再帰はせず、rglob で拾いつつ早めに打ち切り
+    total_len = 0
+    for p in sorted(path.rglob("*")):
+        if p.is_file() and p.suffix.lower() in {".txt", ".md", ".html", ".htm"}:
+            try:
+                raw = p.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            cleaned = _clean_text(raw)
+            texts.append(cleaned)
+            total_len += len(cleaned)
+            if max_chars is not None and total_len >= max_chars:
+                break
+
+    merged = "\n\n".join(texts)
+    if max_chars is not None:
+        return merged[:max_chars]
+    return merged
+
+
+def discover_article_taxonomy(articles_dir: Path) -> Mapping[str, list[Path]]:
+    """カテゴリ名 -> パス一覧 のマッピングを構築する。"""
+    taxonomy: dict[str, list[Path]] = {}
+    if not articles_dir.exists():
+        return taxonomy
+
+    for category_path in sorted(articles_dir.iterdir()):
+        if category_path.is_dir():
+            taxonomy[category_path.name] = [category_path]
+        elif category_path.is_file():
+            taxonomy.setdefault(category_path.stem, []).append(category_path)
+    return taxonomy
+
+
+def classify_category_with_llm(prompt: str, categories: list[str]) -> str | None:
+    """LLM によるカテゴリ分類。カテゴリ名のみを返す。"""
+    if not categories:
+        return None
+
+    category_list = "\n".join(f"- {c}" for c in categories)
+    system = (
+        "あなたは分類器です。読者からの日本語テキストを、"
+        "与えられたカテゴリ一覧の中から最も関連する1つに分類します。"
+        "出力はカテゴリ名のみ、日本語の説明や装飾は禁止です。"
+    )
+    body = textwrap.dedent(
         f"""
-        Using the theme "{theme}", {persona} reframes the core questions inside the {category} lens.
-        The chart "{chart_title}" with values {formatted_values} anchors the section to the heading instead of repeating boilerplate.
-        Reference snippet: {snippet_hint or 'N/A'}.
-        {pack.context_line}
-        The stance stays analytical and skeptical while following what the title and diagram demand.
+        読者からの文章:
+        {prompt}
+
+        利用可能なカテゴリ:
+        {category_list}
+
+        一番関連度が高いと思うカテゴリ名だけを、そのまま1行で出力してください。
+        見つからない場合は「NONE」とだけ出力してください。
         """
-    ).strip()
-
-
-def summarize_section_with_llm(
-    prompt: str,
-    category: str,
-    theme: str,
-    pack: LanguagePack,
-    category_snippet: str,
-    *,
-    values: list[int],
-    labels: list[str],
-    chart_title: str,
-) -> str:
-    if pack.code == "ja":
-        system = (
-            "あなたは日本語のブログ執筆アシスタントです。出力は日本語のみで、翻訳や英訳の挿入は禁止。"
-            "『クライアント』という語を使わず、一般公開向けに、冷静で批判的かつ少しパンクにまとめる。"
-        )
-        body = textwrap.dedent(
-            f"""
-            見出し「{theme}」に対して、約750文字で、かつ{MIN_SECTION_CHARS}文字以上の長文を作成してください。
-            {category}の現場感とヨハネの個人的な体験をつなぎ、パラグラフごとに角度を変えて深掘りします。同じ主張や表現を繰り返さず、段落ごとに新しい視点や具体例を加えること。
-            期待する構造:
-            - 冒頭: 見出しで提示した違和感や問いを、ヨハネの視点で鮮やかに描写する。
-            - 中盤: {pack.context_line} を踏まえ、事例・数字・倫理的なひっかかりを具体的に展開する。
-            - 後半: 図「{chart_title}」のラベル{labels}と値{values}を手がかりに、リスク設計や意思決定のニュアンスを掘る。
-            - 締め: 読者に向けて静かな伴走を示す。
-            参考スニペット（引用や宣伝は禁止。本文には書かない）:
-            {category_snippet[:1200] or 'N/A'}
-            語調: 冷静で批判的、かすかなパンクさを含める。英訳・翻訳注記は禁止。インデックスの内容を抜粋したと明示する記述は避ける。
-            """
-        )
-    else:
-        system = "You are a structured blog assistant. Keep the language aligned to the user locale."
-        persona = persona_name(pack)
-        body = textwrap.dedent(
-            f"""
-            Write a long-form section in {pack.code} with roughly 750 characters (at least {MIN_SECTION_CHARS}) for persona {persona}.
-            Theme keyword: {theme}
-            Chosen category: {category}
-            Desired structure:
-            - Opening: a vivid hook that ties {persona}'s personal tension to the heading.
-            - Middle: weave {pack.context_line} with concrete stories, data points, and ethical friction.
-            - Later: interpret the chart '{chart_title}' using labels {labels} and values {values} to shape risk/return nuance.
-            - Closing: offer a quiet companion message to readers.
-            Context from the index (do NOT quote or promote it in the text; use it silently):
-            {category_snippet[:1200] or 'N/A'}
-            Keep it analytical, skeptical, reflective, and avoid repetitive boilerplate or citation-like phrasing.
-            """
-        )
-
-    llm_text = _post_llm(SECTION_MODEL, body, system=system)
-    if _is_llm_error(llm_text):
-        llm_text = _fallback_section_summary(
-            prompt=prompt,
-            category=category,
-            theme=theme,
-            pack=pack,
-            values=values,
-            labels=labels,
-            category_snippet=category_snippet,
-            chart_title=chart_title,
-        )
-
-    cleaned = _clean_text(llm_text)
-
-    return _ensure_minimum_length(
-        cleaned,
-        min_chars=MIN_SECTION_CHARS,
-        padding_phrase=pack.padding_phrase,
-        theme=theme,
-        category=category,
     )
 
+    answer = _post_llm(CLASSIFIER_MODEL, body, system=system)
+    if _is_llm_error(answer):
+        return None
 
-def explain_chart_with_llm(
-    values: list[int],
-    labels: list[str],
-    theme: str,
-    pack: LanguagePack,
+    ans = answer.strip()
+    if ans.upper() == "NONE":
+        return None
+
+    # 完全一致 or 大文字小文字無視でマッチ
+    for c in categories:
+        if ans == c or ans.lower() == c.lower():
+            return c
+    for c in categories:
+        if c.lower() in ans.lower():
+            return c
+    return None
+
+
+def choose_category_fallback(prompt: str, categories: list[str]) -> str | None:
+    """LLM で決まらなかった場合のフォールバック：キーワード重みづけ。"""
+    if not categories:
+        return None
+    normalized = prompt.lower()
+
+    scores: dict[str, int] = {}
+    for cat in categories:
+        score = 0
+        simple = re.sub(r"[（(].*?[）)]", "", cat).strip()
+        if simple.lower() in normalized:
+            score += 3
+        for token in re.split(r"[^\w]+", simple.lower()):
+            if token and token in normalized:
+                score += 1
+        scores[cat] = score
+
+    best = max(scores, key=scores.get)
+    if scores[best] == 0:
+        return None
+    return best
+
+
+def _extract_relevant_snippet(
+    cleaned_text: str,
     *,
-    chart_title: str,
+    keywords: list[str],
+    max_chars: int = 1200,
 ) -> str:
-    if not ENABLE_CHART_LLM:
-        if pack.code == "ja":
-            return (
-                f"図「{chart_title}」は{theme}の文脈で、{', '.join(labels)}のバランスを値{values}として示す。\n"
-                "極端な値の差を冷静に読み取り、見出しの問いに沿って解釈する。"
-            )
-        if pack.code == "it":
-            return (
-                f"Il grafico '{chart_title}' per '{theme}' mette a confronto {', '.join(labels)} con valori {values}.\n"
-                "Le differenze evidenziano dove attenzione e rischio vanno calibrati."
-            )
-        persona = persona_name(pack)
-        return (
-            f"The chart '{chart_title}' ties the theme '{theme}' to the {labels} weights {values}.\n"
-            f"It highlights where {persona} would lean in or step back while calibrating risk."
-        )
-
-    if pack.code == "ja":
-        system = (
-            "あなたは日本語でグラフを簡潔に解説するアシスタントです。出力は日本語のみで翻訳注記は禁止。"
-        )
-        prompt_body = textwrap.dedent(
-            f"""
-            以下の擬似データを持つ図を2〜3文で解説し、文と文の間に改行を入れてください。英訳・翻訳の併記は禁止です。
-            テーマ: {theme}
-            図のタイトル: {chart_title}
-            ラベルと値: {list(zip(labels, values))}
-            トーン: 冷静で批判的、わずかにパンク。
-            """
-        )
-    else:
-        system = "Provide concise chart commentary matching the locale."
-        prompt_body = textwrap.dedent(
-            f"""
-            Summarize the following synthetic chart insightfully in {pack.code}. Provide 2-3 sentences separated by line breaks.
-            Theme: {theme}
-            Chart title: {chart_title}
-            Labels and values: {list(zip(labels, values))}
-            Persona tone: calm, critical, and slightly punk.
-            """
-        )
-    llm_text = _post_llm(CHART_MODEL, prompt_body, system=system)
-    if _is_llm_error(llm_text):
-        if pack.code == "ja":
-            return (
-                f"図「{chart_title}」は{theme}の文脈で、{', '.join(labels)}のバランスを値{values}として示す。\n"
-                "極端な値の差を冷静に読み取り、見出しの問いに沿って解釈する。"
-            )
-        if pack.code == "it":
-            return (
-                f"Il grafico '{chart_title}' per '{theme}' mette a confronto {', '.join(labels)} con valori {values}.\n"
-                "Le differenze evidenziano dove attenzione e rischio vanno calibrati."
-            )
-        persona = persona_name(pack)
-        return (
-            f"The chart '{chart_title}' ties the theme '{theme}' to the {labels} weights {values}.\n"
-            f"It highlights where {persona} would lean in or step back while calibrating risk."
-        )
-    return _clean_text(llm_text)
-
-
-def _summarize_main_section(
-    *,
-    prompt: str,
-    category: str,
-    pack: LanguagePack,
-    combined_snippet: str,
-    heading: str,
-) -> str:
-    target_chars = min(MAX_ARTICLE_CHARS - 200, MAIN_SECTION_TARGET_CHARS)
-    if pack.code == "ja":
-        system = "あなたは日本語で端的に執筆するブログライターです。"
-        body = textwrap.dedent(
-            f"""
-            クライアント指示を要約し、分類結果「{category}」に沿った見出し「{heading}」の本文を{target_chars}文字前後で作成してください。
-            /indexes/articlesで抽出したセクションとmybrainの知識を引用せず統合し、翻訳や英語併記は禁止。
-            全体の口調は冷静で批判的、少しパンクに。重複や箇条書きは避け、連続した短い段落でまとめる。
-            利用できる素材:
-            {combined_snippet[:1200] or 'N/A'}
-            """
-        )
-    elif pack.code == "it":
-        system = "Scrivi in italiano in modo conciso e coerente."
-        body = textwrap.dedent(
-            f"""
-            Riassumi le istruzioni del cliente e la categoria "{category}" nella sezione "{heading}" in circa {target_chars} caratteri.
-            Usa gli appunti estratti da /indexes/articles e le fonti Berkshire, bible, catholic, mybrain come contesto, senza citazioni dirette.
-            Tono calmo, critico e leggermente punk; niente punti elenco, niente ripetizioni.
-            Testo di riferimento:
-            {combined_snippet[:1200] or 'N/A'}
-            """
-        )
-    else:
-        system = "Write a compact English main section with analytical calm."
-        body = textwrap.dedent(
-            f"""
-            Summarize the client brief under the category "{category}" as the section "{heading}" in roughly {target_chars} characters.
-            Use the extracted /indexes/articles notes plus Berkshire, bible, catholic, and mybrain context; do not quote directly.
-            Keep a critical, quietly punk tone without bullet points or repetition.
-            Reference material:
-            {combined_snippet[:1200] or 'N/A'}
-            """
-        )
-
-    llm_text = _post_llm(SECTION_MODEL, body, system=system)
-    if _is_llm_error(llm_text):
-        return _truncate_to_chars(_clean_text(combined_snippet or prompt), limit=target_chars)
-    return _truncate_to_chars(_clean_text(llm_text), limit=target_chars)
-
-
-def _enforce_total_char_limit(main_body: str, summary_body: str) -> tuple[str, str]:
-    total = len(main_body) + len(summary_body)
-    if total <= MAX_ARTICLE_CHARS:
-        return main_body, summary_body
-
-    main_limit = max(MIN_SECTION_CHARS, MAX_ARTICLE_CHARS - len(summary_body))
-    main_body = _truncate_to_chars(main_body, limit=max(main_limit, 0))
-    total = len(main_body) + len(summary_body)
-    if total > MAX_ARTICLE_CHARS:
-        summary_body = _truncate_to_chars(summary_body, limit=max(MAX_ARTICLE_CHARS - len(main_body), 0))
-    return main_body, summary_body
-
-
-def generate_sections(
-    prompt: str,
-    category: str,
-    pack: LanguagePack,
-    *,
-    main_heading: str,
-    combined_snippet: str,
-    section_snippet: str,
-    knowledge_text: str,
-    subcategory: str | None,
-) -> list[Section]:
-    with status_scope(f"generate_sections:{pack.code}"):
-        blended_snippet = _clean_text(
-            "\n\n".join(part for part in (section_snippet, combined_snippet, knowledge_text) if part)
-        )
-        main_body = _summarize_main_section(
-            prompt=prompt,
-            category=category,
-            pack=pack,
-            combined_snippet=blended_snippet or combined_snippet,
-            heading=main_heading,
-        )
-        main_body = _ensure_minimum_length(
-            main_body,
-            min_chars=MIN_SECTION_CHARS,
-            padding_phrase=pack.padding_phrase,
-            theme=main_heading,
-            category=category,
-        )
-
-        chart_values = _deterministic_numbers(f"{prompt}:{category}:{subcategory or ''}", 3, 9)
-        diagram_html = build_bar_chart(
-            chart_values,
-            pack.chart_labels.get("bar", ["A", "B", "C"]),
-            title=pack.chart_titles.get("bar", "Synthetic chart"),
-            caption=pack.chart_captions.get("bar", ""),
-            aria_label=f"{category} — {subcategory or main_heading}",
-        )
-        chart_note = explain_chart_with_llm(
-            chart_values,
-            pack.chart_labels.get("bar", ["A", "B", "C"]),
-            subcategory or main_heading,
-            pack,
-            chart_title=pack.chart_titles.get("bar", "Synthetic chart"),
-        )
-
-        return [
-            Section(
-                heading=main_heading,
-                body=main_body,
-                diagram_html=diagram_html,
-                chart_note=chart_note,
-            )
-        ]
-
-
-def summarize_index_with_llm(
-    *,
-    prompt: str,
-    category: str,
-    pack: LanguagePack,
-    index_text: str,
-) -> str:
-    cleaned_index = _clean_text(index_text)
-    if not cleaned_index:
+    """クリーン済みテキストからキーワードに関連しそうな文をスコアリングして抽出。"""
+    if not cleaned_text:
         return ""
 
-    snippet = cleaned_index[:1600]
-    if pack.code == "ja":
-        system = (
-            "あなたは日本語で批判的かつ端的に要約するアシスタントです。出力は日本語のみ。"
-        )
-        body = textwrap.dedent(
-            f"""
-            以下のインデックス知識を踏まえ、テーマ「{prompt}」とカテゴリ「{category}」に沿った総論を3〜4文でまとめてください。
-            カテゴリ／サブカテゴリ抽出、セクション抜粋、mybrain要約、図解化という流れを踏まえた結論にしてください。
-            同じ文章を繰り返さず、文字化けに見える記号は使わないこと。引用文や宣伝調は禁止。
-            参照テキスト:
-            {snippet}
-            """
-        )
-    else:
-        system = "Provide a concise, non-repetitive summary in the user's locale."
-        body = textwrap.dedent(
-            f"""
-            Using the index notes below, craft a brief conclusion for category "{category}" and prompt "{prompt}".
-            Make sure it reflects the pipeline (category/subcategory detection, section extraction, mybrain synthesis, diagramming).
-            Keep it 3-4 sentences, avoid repeated lines or garbled characters, and maintain an analytical, calm tone.
-            Source notes:
-            {snippet}
-            """
-        )
+    units: list[str] = []
+    for block in cleaned_text.splitlines():
+        block = block.strip()
+        if not block:
+            continue
+        for sent in re.split(r"(?<=[。．.!?])\s+|\s{2,}", block):
+            sent = sent.strip()
+            if sent:
+                units.append(sent)
+    if not units:
+        return ""
 
-    llm_text = _post_llm(SECTION_MODEL, body, system=system)
-    if _is_llm_error(llm_text):
-        return _clean_text(textwrap.shorten(cleaned_index, width=500, placeholder="…"))
+    keys = [k.lower() for k in keywords if k]
 
-    return _clean_text(llm_text)
+    scored: list[tuple[int, int, str]] = []
+    for i, s in enumerate(units):
+        low = s.lower()
+        score = sum(2 for k in keys if k in low)
+        scored.append((score, i, s))
 
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    selected: list[str] = []
+    total = 0
+    for score, _, s in scored:
+        if score == 0 and selected:
+            break
+        ln = len(s)
+        if total + ln > max_chars:
+            break
+        selected.append(s)
+        total += ln + 1
 
-def build_outro(common_text: str, pack: LanguagePack) -> str:
-    outro_parts = list(pack.outro_lines)
-    if common_text:
-        outro_parts.append(common_text)
-    return "\n".join(outro_parts)
+    return "\n".join(selected)
 
 
-def _build_summary_section(
-    *, summary: str, outro: str, pack: LanguagePack, category: str, heading: str
-) -> Section:
-    combined = "\n".join(part for part in (summary, outro) if part)
-    combined = _clean_text(combined)
-    extended_outro = _ensure_minimum_length(
-        combined,
-        min_chars=MIN_SECTION_CHARS,
-        padding_phrase=pack.padding_phrase,
-        theme=heading,
-        category=category,
+@dataclass
+class Section:
+    title: str
+    body: str
+    diagram: str = ""
+
+
+# ======================= セクション構成 =======================
+
+
+def plan_sections(prompt: str, category: str, index_excerpt: str, knowledge_excerpt: str) -> list[dict[str, str]]:
+    """7つのセクション構成（タイトル＋フォーカス）を LLM で決める。"""
+    system = (
+        "あなたは日本語の長文ブログ編集者です。"
+        "読者からの依頼文とデータソース/知識ファイルをもとに、"
+        "7つのセクション構成（タイトルとフォーカス）を設計してください。"
     )
-    return Section(
-        heading=heading,
-        body=extended_outro,
-        diagram_html="",
-        chart_note="",
-    )
+    body = textwrap.dedent(
+        f"""
+        読者からの依頼文:
+        {prompt}
 
+        選択されたカテゴリ: {category}
 
-def _shorten_phrase(text: str, *, limit: int = 28) -> str:
-    squashed = " ".join(text.split())
-    if len(squashed) <= limit:
-        return squashed
-    return squashed[:limit] + "…"
+        データソース抜粋:
+        {index_excerpt}
 
+        mybrain 抜粋:
+        {knowledge_excerpt}
 
-def _sanitize_tag(label: str) -> str:
-    cleaned = re.sub(r"[#]+", "", label)
-    cleaned = re.sub(r"\s+", "-", cleaned.strip())
-    limited = cleaned[:15]
-    if not limited:
-        limited = "tag"
-    return f"#{limited}"
+        出力フォーマット（JSONのみ・日本語）:
+        {{
+          "sections": [
+            {{"title": "セクション1のタイトル", "focus": "このセクションで掘り下げる観点"}},
+            ...
+            （合計7件）
+          ]
+        }}
 
-
-def _build_persona_description(prompt: str, category: str, pack: LanguagePack) -> str:
-    trimmed = _shorten_phrase(prompt, limit=36)
-    if pack.code == "ja":
-        return (
-            f"ヨハネが{category}の歪さをかみ砕き、「{trimmed}」を夜のカフェ目線で要約する後書き。"
-            "リスクと静けさのバランスを探る読者に向けた一息メモ。"
-        )
-    if pack.code == "it":
-        return (
-            f"Yohane smonta le crepe di {category} e riassume '{trimmed}' con lo sguardo notturno del caffè,"
-            " per chi cerca equilibrio tra rischio e quiete."
-        )
-    persona = persona_name(pack)
-    return (
-        f"{persona} distills the cracks in {category}, turning '{trimmed}' into a late-night café recap for readers"
-        " hunting balance between risk and calm."
+        条件:
+        - セクションは7つちょうど作る。
+        - タイトルは簡潔で、日本語で15〜30文字程度。
+        - focusは、そのセクションで何を論じるかを1〜2文で説明する。
+        - Punk Rock / NFT / Web3 など、読者のテーマからずれない。
+        - 同じ意味のセクションを重複させない。
+        - セクションタイトルやfocusに「インデックス」「クライアント」という語を含めない。
+        - JSON以外の文字は出力しない。
+        """
     )
 
+    answer = _post_llm(SECTION_MODEL, body, system=system)
+    if _is_llm_error(answer):
+        fallback_titles = [
+            "序章: テーマと違和感",
+            "歴史と文脈",
+            "技術と仕組み",
+            "市場とお金の流れ",
+            "文化・コミュニティ",
+            "リスクと倫理",
+            "未来への問い",
+        ]
+        return [{"title": t, "focus": ""} for t in fallback_titles]
 
-def _build_persona_tags(prompt: str, category: str, pack: LanguagePack) -> str:
-    focus = _shorten_phrase(prompt, limit=18) or category
-    if pack.code == "ja":
-        big = [f"{category}解体", "ヨハネの夜視点"]
-        normal = ["静かな反逆", "リスク設計メモ"]
-        small = [f"{focus}断片", "データと物語"]
-    elif pack.code == "it":
-        big = [f"{category} senza filtri", "Lente notturna di Yohane"]
-        normal = ["punk-critico", "rischio-e-quiete"]
-        small = [f"nota-{_shorten_phrase(focus, limit=12)}", "dati-e-narrazione"]
-    else:
-        persona = persona_name(pack)
-        big = [f"{category} breakdown", f"{persona}-night-lens"]
-        normal = ["quiet-punk", "risk-vs-calm"]
-        small = [f"{focus}-memo", "data-x-story"]
+    try:
+        data = json.loads(answer)
+        sections = data.get("sections", [])
+        if not isinstance(sections, list) or len(sections) != 7:
+            raise ValueError("sections length mismatch")
+        cleaned: list[dict[str, str]] = []
+        for sec in sections:
+            title = str(sec.get("title", "")).strip()
+            focus = str(sec.get("focus", "")).strip()
+            if not title:
+                continue
+            cleaned.append({"title": title, "focus": focus})
+        if len(cleaned) != 7:
+            raise ValueError("sections cleaned length mismatch")
+        return cleaned
+    except Exception:
+        fallback_titles = [
+            "序章: テーマと違和感",
+            "歴史と文脈",
+            "技術と仕組み",
+            "市場とお金の流れ",
+            "文化・コミュニティ",
+            "リスクと倫理",
+            "未来への問い",
+        ]
+        return [{"title": t, "focus": ""} for t in fallback_titles]
 
-    tags = big + normal + small
-    return " ".join(_sanitize_tag(tag) for tag in tags)
 
-
-def _generate_section_heading(
-    *,
-    kind: str,
+def build_section_body(
     prompt: str,
     category: str,
-    pack: LanguagePack,
-    index_text: str,
+    section_title: str,
+    focus: str,
+    cleaned_index_text: str,
+    cleaned_knowledge_text: str,
 ) -> str:
-    """Craft a persona-aware heading from index context without generic labels."""
+    """各セクション本文を LLM で生成（フォールバック用・本文のみ）。"""
+    keywords = []
+    for token in re.split(r"[^\w]+", f"{prompt} {category} {section_title} {focus}"):
+        token = token.strip()
+        if len(token) >= 3:
+            keywords.append(token.lower())
 
-    snippet = _clean_text(index_text)[:360]
-    persona = persona_name(pack)
-    if pack.code == "ja":
-        system = "15文字前後の日本語見出しを作る編集者です。"
-        body = textwrap.dedent(
-            f"""
-            ペルソナ「哲学者気取りのヨハネ」に刺さる{('本論の見出し' if kind == 'main' else '締めの見出し')}を1つだけ返してください。
-            テーマ: {prompt}
-            カテゴリ: {category}
-            参考になるインデックス抜粋（日本語または英語）:
-            {snippet or 'N/A'}
-            禁止語: メインセクション, 総論, Conclusion, Main section, Main Section, Main Section
-            余計な記号や引用符は不要です。
-            """
-        )
-    elif pack.code == "it":
-        system = "Sei un editor che crea titoli brevi e incisivi."
-        body = textwrap.dedent(
-            f"""
-            Crea un titolo di circa 15 caratteri per la {('sezione centrale' if kind == 'main' else 'conclusione')} che colpisca il persona "Yohane".
-            Tema: {prompt}
-            Categoria: {category}
-            Spunti (italiano/inglese) presi dall'indice:
-            {snippet or 'N/A'}
-            Evita parole generiche come Main section o Conclusion; niente virgolette.
-            """
-        )
-    else:
-        system = "You write compact, persona-aware headings."
-        body = textwrap.dedent(
-            f"""
-            Propose a single heading (~15 characters) for the {('core section' if kind == 'main' else 'wrap-up')} that resonates with persona "{persona}".
-            Theme: {prompt}
-            Category: {category}
-            Index clues (EN/JA):
-            {snippet or 'N/A'}
-            Avoid generic labels like Main section or Conclusion and drop quotes.
-            """
-        )
+    index_snippet = _extract_relevant_snippet(cleaned_index_text, keywords=keywords, max_chars=600)
+    knowledge_snippet = _extract_relevant_snippet(cleaned_knowledge_text, keywords=keywords, max_chars=600)
 
-    heading = _post_llm(SECTION_MODEL, body, system=system)
-    if _is_llm_error(heading):
-        fallback = (
-            f"{pack.main_heading} — {category}"
-            if kind == "main"
-            else f"{pack.summary_heading}（{category}）"
-        )
-        return _shorten_phrase(fallback, limit=22)
+    system = (
+        "あなたは日本語の長文ブログライターです。"
+        "データソースは客観的な最新情報、mybrainはヨハネの知識・解釈として扱い、"
+        "両方を統合して自然な文章を作成してください。"
+        "英語やスペイン語など他言語の翻訳併記、特定サービスの宣伝文句、"
+        "同じ文章の繰り返しは禁止です。"
+    )
 
-    cleaned = _clean_text(heading).splitlines()[0]
-    cleaned = re.sub(r'^["\'\s]+|["\'\s]+$', "", cleaned)
-    cleaned = re.sub(r"(?i)main section|conclusion|総論|メインセクション", "", cleaned)
-    return _shorten_phrase(cleaned or pack.main_heading, limit=22)
+    body = textwrap.dedent(
+        f"""
+        読者からの依頼文:
+        {prompt}
+
+        カテゴリ: {category}
+        セクションタイトル: {section_title}
+        セクションの焦点: {focus}
+
+        データソースから関連しそうな情報（客観情報）:
+        {index_snippet or "（利用可能な情報なし）"}
+
+        mybrain から関連しそうな情報（ヨハネの知識・解釈）:
+        {knowledge_snippet or "（利用可能な情報なし）"}
+
+        要件:
+        - 上記の情報を参考に、このセクション専用の本文を日本語で書く。
+        - 「データソース」「mybrain」「インデックス」「クライアント」といった語は本文に出さない。
+        - 全体でおよそ {MIN_SECTION_CHARS} 文字以上になるようにする。
+        - 特定の取引所やサービス（Binanceなど）を褒めちぎる宣伝文句は禁止。
+        - Español など他言語の単語は出さない。
+        - 同じ文をコピペしたような繰り返しは禁止。
+        - 「(注: …」「(注2: …」のようなメタ注記や、この文章が自動生成であることの説明は書かない。
+        - 哲学者気取りのヨハネが論理展開しながら、静かに読者に語りかけるトーンにする。
+        """
+    )
+
+    text = _post_llm(SECTION_MODEL, body, system=system)
+    if _is_llm_error(text):
+        # LLM 失敗時はスニペットを返す
+        fallback = (index_snippet + "\n\n" + knowledge_snippet).strip()
+        return _sanitize_output_text(fallback or section_title)
+
+    return _sanitize_output_text(text)
+
+
+def _build_simple_diagram(section_title: str, body: str) -> str:
+    """LLM JSON が壊れた場合などの簡易図解生成（非LLM）。"""
+    summary = _clean_text(body)[:120].replace("\n", " ")
+    diagram = textwrap.dedent(
+        f"""
+        {section_title}の構造イメージ
+        ┌ 主題 ── Punk Rock / NFT
+        ├ 視点 ── ヨハネの解釈
+        └ 要点 ── {summary}
+        """
+    )
+    return _sanitize_output_text(diagram)
+
+
+def build_section(
+    prompt: str,
+    category: str,
+    section_title: str,
+    focus: str,
+    cleaned_index_text: str,
+    cleaned_knowledge_text: str,
+) -> Section:
+    """各セクションの本文＋図解を LLM 1回で生成。"""
+    keywords = []
+    for token in re.split(r"[^\w]+", f"{prompt} {category} {section_title} {focus}"):
+        token = token.strip()
+        if len(token) >= 3:
+            keywords.append(token.lower())
+
+    index_snippet = _extract_relevant_snippet(cleaned_index_text, keywords=keywords, max_chars=600)
+    knowledge_snippet = _extract_relevant_snippet(cleaned_knowledge_text, keywords=keywords, max_chars=600)
+
+    system = (
+        "あなたは日本語の長文ブログライターです。"
+        "データソースは客観的な最新情報、mybrainはヨハネの知識・解釈として扱い、"
+        "両方を統合して自然な文章と図解を作成してください。"
+    )
+
+    body = textwrap.dedent(
+        f"""
+        読者からの依頼文:
+        {prompt}
+
+        カテゴリ: {category}
+        セクションタイトル: {section_title}
+        セクションの焦点: {focus}
+
+        データソースから関連しそうな情報（客観情報）:
+        {index_snippet or "（利用可能な情報なし）"}
+
+        mybrain から関連しそうな情報（ヨハネの知識・解釈）:
+        {knowledge_snippet or "（利用可能な情報なし）"}
+
+        出力フォーマット（JSON のみ、日本語）:
+        {{
+          "body": "このセクションの本文（日本語・約{MIN_SECTION_CHARS}文字以上）",
+          "diagram": "本文の内容を1枚でイメージできる図解の説明文または簡単なテキスト図（日本語、最大300文字程度）"
+        }}
+
+        条件:
+        - 本文:
+          - 上記の情報を参考に、このセクション専用の本文を日本語で書く。
+          - 「データソース」「mybrain」「インデックス」「クライアント」といった語は本文に出さない。
+          - 全体でおよそ {MIN_SECTION_CHARS} 文字以上になるようにする。
+          - 特定の取引所やサービス（Binanceなど）を褒めちぎる宣伝文句は禁止。
+          - Español など他言語の単語は出さない。
+          - 同じ文をコピペしたような繰り返しは禁止。
+          - 「(注: …」「(注2: …」のようなメタ注記や、この文章が自動生成であることの説明は書かない。
+          - 哲学者気取りのヨハネが論理展開しながら、静かに読者に語りかけるトーンにする。
+        - 図解:
+          - 本文の内容を、読者が頭の中で構造としてイメージしやすいようにまとめる。
+          - 箇条書きや「A → B → C」のような簡単なテキスト図でよい。
+          - 「インデックス」「クライアント」という語は図解にも出さない。
+          - メタ注記やシステム的な説明は書かない。
+        - JSON以外の文字は一切出力しない。
+        """
+    )
+
+    answer = _post_llm(SECTION_MODEL, body, system=system)
+    if _is_llm_error(answer):
+        body_text = build_section_body(
+            prompt,
+            category,
+            section_title,
+            focus,
+            cleaned_index_text,
+            cleaned_knowledge_text,
+        )
+        diagram_text = _build_simple_diagram(section_title, body_text)
+        return Section(title=section_title, body=body_text, diagram=diagram_text)
+
+    try:
+        data = json.loads(answer)
+        raw_body = str(data.get("body", "") or "").strip()
+        raw_diagram = str(data.get("diagram", "") or "").strip()
+        if not raw_body:
+            raise ValueError("empty body in JSON")
+
+        body_text = _sanitize_output_text(raw_body)
+        diagram_text = _sanitize_output_text(raw_diagram) if raw_diagram else ""
+        if not diagram_text:
+            diagram_text = _build_simple_diagram(section_title, body_text)
+
+        return Section(title=section_title, body=body_text, diagram=diagram_text)
+    except Exception:
+        body_text = build_section_body(
+            prompt,
+            category,
+            section_title,
+            focus,
+            cleaned_index_text,
+            cleaned_knowledge_text,
+        )
+        diagram_text = _build_simple_diagram(section_title, body_text)
+        return Section(title=section_title, body=body_text, diagram=diagram_text)
+
+
+def build_conclusion(
+    prompt: str,
+    category: str,
+    sections: list[Section],
+    cleaned_knowledge_text: str,
+) -> str:
+    """7 セクション＋ mybrain を踏まえた総論を生成。"""
+    # タイトルと各セクションの冒頭部分だけをコンテキストにする（短く）
+    body_excerpt = "\n\n".join(f"[{i+1}] {sec.title}\n{sec.body[:200]}" for i, sec in enumerate(sections))
+    body_excerpt = body_excerpt[:1200]
+    knowledge_excerpt = _extract_relevant_snippet(cleaned_knowledge_text, keywords=[category], max_chars=500)
+
+    system = (
+        "あなたは日本語の長文ブログの締めとなる「総論」を書くアシスタントです。"
+        "7つのセクションで議論してきた内容を踏まえつつ、mybrainから見える背景を重ね、"
+        "読者にとっての意味や今後の問いを落ち着いてまとめてください。"
+    )
+
+    body = textwrap.dedent(
+        f"""
+        読者からの依頼文:
+        {prompt}
+
+        カテゴリ: {category}
+
+        これまでの7セクションの内容（抜粋）:
+        {body_excerpt}
+
+        mybrain からの文脈・背景情報（抜粋）:
+        {knowledge_excerpt or "（追加の知識情報なし）"}
+
+        要件:
+        - 7つのセクションで何を考えてきたのかを3〜5段落で整理する。
+        - カテゴリ「{category}」と読者のテーマを結び、読者の行動・視点にどんな変化を促したいかを書く。
+        - 全体でおよそ {SUMMARY_TARGET_CHARS} 文字前後の日本語にする。
+        - 宣伝や煽り文句ではなく、静かな余韻と次の問いを残すトーン。
+        - 本文中に「インデックス」「クライアント」といった語は書かない。
+        - 「総論です」「まとめます」などのメタな一文や、「(注: …」などの注記は不要。本文だけを書く。
+        """
+    )
+
+    text = _post_llm(SECTION_MODEL, body, system=system)
+    if _is_llm_error(text):
+        fallback = _sanitize_output_text(body_excerpt or prompt)
+        return fallback[:SUMMARY_TARGET_CHARS].rstrip() + "…"
+
+    return _sanitize_output_text(text)
+
+
+def build_meta(
+    prompt: str,
+    category: str,
+    sections: list[Section],
+    conclusion: str,
+) -> tuple[str, str, str]:
+    """タイトル・ディスクリプション200文字・タグ6個を LLM に作らせる。"""
+    sections_excerpt = "\n\n".join(f"[{i+1}] {s.title}" for i, s in enumerate(sections))
+    system = (
+        "あなたは日本語のブログ編集者です。"
+        "記事全体の内容に合ったタイトル・ディスクリプション・タグを設計してください。"
+    )
+
+    body = textwrap.dedent(
+        f"""
+        読者からの依頼文:
+        {prompt}
+
+        カテゴリ: {category}
+
+        セクション一覧:
+        {sections_excerpt}
+
+        総論抜粋:
+        {conclusion[:600]}
+
+        出力フォーマット（JSONのみ）:
+        {{
+          "title": "ブログ全体のタイトル（日本語）",
+          "description": "記事全体を要約した約200文字のディスクリプション（日本語）",
+          "tags": {{
+            "big": ["ビッグキーワード1", "ビッグキーワード2"],
+            "normal": ["普通キーワード1", "普通キーワード2"],
+            "small": ["スモールキーワード1", "スモールキーワード2"]
+          }}
+        }}
+
+        条件:
+        - タイトルは読者の興味を引きつつ、煽りすぎない。
+        - タイトル・ディスクリプション・タグに「インデックス」「クライアント」という語を含めない。
+        - ディスクリプションは200文字を目安にし、超える場合でも210文字以内。
+        - タグは合計6個（big2, normal2, small2）。
+        - 特定サービスの宣伝ワードは禁止。中立的なキーワードにする。
+        - 「(注: …」などのメタ注記や、この文章が自動生成であることの説明は書かない。
+        - JSON以外は出力しない。
+        """
+    )
+
+    answer = _post_llm(SECTION_MODEL, body, system=system)
+    # フォールバック（LLM が完全に失敗した場合だけ）
+    base_title = (prompt.strip() or category or "ブログ").replace("\n", " ")
+    if len(base_title) > 32:
+        base_title = base_title[:32].rstrip() + "…"
+    title = _sanitize_output_text(base_title)
+
+    base_desc = prompt.strip().replace("\n", " ")
+    if not base_desc:
+        base_desc = "読者から与えられたテーマをもとにしたブログ記事。"
+    if len(base_desc) > 200:
+        base_desc = base_desc[:200].rstrip() + "…"
+    description = _sanitize_output_text(base_desc)
+
+    tags_line = "PunkRock,NFT"
+
+    if _is_llm_error(answer):
+        return title, description, tags_line
+
+    try:
+        data = json.loads(answer)
+        t = str(data.get("title") or "").strip()
+        d = str(data.get("description") or "").strip()
+        tags = data.get("tags") or {}
+        big = [str(x).strip() for x in tags.get("big", []) if str(x).strip()]
+        normal = [str(x).strip() for x in tags.get("normal", []) if str(x).strip()]
+        small = [str(x).strip() for x in tags.get("small", []) if str(x).strip()]
+
+        if t:
+            title = _sanitize_output_text(t)
+        if d:
+            if len(d) > 200:
+                d = d[:200].rstrip() + "…"
+            description = _sanitize_output_text(d)
+
+        all_tags = big[:2] + normal[:2] + small[:2]
+        if all_tags:
+            tags_line = ",".join(_sanitize_output_text(tag) for tag in all_tags)
+
+        return title, description, tags_line
+    except Exception:
+        return title, description, tags_line
+
+
+def _format_html_text(text: str) -> str:
+    escaped = html.escape(text)
+    return escaped.replace("\n", "<br />\n")
 
 
 def compose_html(
     title: str,
     description: str,
-    intro: str,
     sections: list[Section],
-    summary_section: Section,
-    *,
-    padding_phrase: str,
-    persona_description: str,
-    persona_tags: str,
-    lang_code: str,
+    conclusion: str,
+    meta_tags_line: str,
 ) -> str:
-    body_parts = [
-        f"<h1>{html.escape(title)}</h1>",
-        f"<p class='description'>{_format_text_block(description)}</p>",
-        f"<p class='intro'>{_format_text_block(intro)}</p>",
-    ]
-    for section in sections:
-        body_parts.append(f"<h2>{html.escape(section.heading)}</h2>")
-        body_parts.append(f"<p>{_format_text_block(section.body)}</p>")
-        body_parts.append(section.diagram_html)
-        if section.chart_note.strip():
-            body_parts.append(f"<p class='chart-note'>{_format_text_block(section.chart_note)}</p>")
-    body_parts.append(f"<h2>{html.escape(summary_section.heading)}</h2>")
-    body_parts.append(f"<p>{_format_text_block(summary_section.body)}</p>")
+    """最終 HTML を組み立てる。"""
+    parts: list[str] = []
+    parts.append("<!DOCTYPE html>")
+    parts.append('<html lang="ja">')
+    parts.append("<head>")
+    parts.append('  <meta charset="UTF-8" />')
+    parts.append(f"  <title>{html.escape(title)}</title>")
+    parts.append("</head>")
+    parts.append("<body>")
+    parts.append("<article>")
 
-    body_parts.append("<section class='persona-meta'>")
-    body_parts.append("<h3>Description</h3>")
-    body_parts.append(f"<p class='persona-description'>{_format_text_block(persona_description)}</p>")
-    body_parts.append("<h3>Tags</h3>")
-    body_parts.append(f"<p class='persona-tags'>{html.escape(persona_tags)}</p>")
-    body_parts.append("</section>")
+    parts.append(f"<h1>{html.escape(title)}</h1>")
+    parts.append(f"<p class='description'>{_format_html_text(description)}</p>")
 
-    html_doc = "\n".join(body_parts)
-    return textwrap.dedent(
-        f"""
-        <!DOCTYPE html>
-        <html lang="{html.escape(lang_code)}">
-        <head>
-            <meta charset="UTF-8" />
-            <title>{html.escape(title)}</title>
-        </head>
-        <body>
-        <article>
-        {html_doc}
-        </article>
-        </body>
-        </html>
-        """
-    ).strip()
+    for i, sec in enumerate(sections, start=1):
+        parts.append("<section>")
+        parts.append(f"<h2>第{i}章 {html.escape(sec.title)}</h2>")
+        parts.append(f"<p>{_format_html_text(sec.body)}</p>")
+        if sec.diagram:
+            parts.append("<div class='diagram'>")
+            parts.append("<h3>図解</h3>")
+            parts.append(f"<p>{_format_html_text(sec.diagram)}</p>")
+            parts.append("</div>")
+        parts.append("</section>")
 
+    parts.append("<section>")
+    parts.append("<h2>総論</h2>")
+    parts.append(f"<p>{_format_html_text(conclusion)}</p>")
+    parts.append("</section>")
 
-def build_article(
-    prompt: str,
-    pack: LanguagePack,
-    *,
-    category: str,
-    common_text: str,
-    category_snippet: str,
-    section_snippet: str,
-    knowledge_text: str,
-    subcategory: str | None,
-) -> str:
-    with status_scope(f"build_article:{pack.code}"):
-        combined_index_text = _clean_text(
-            "\n\n".join(
-                part
-                for part in (category_snippet, section_snippet, knowledge_text, common_text)
-                if part
-            )
-        )
-        main_heading = _generate_section_heading(
-            kind="main",
-            prompt=prompt,
-            category=category,
-            pack=pack,
-            index_text=combined_index_text,
-        )
-        summary_heading = "総論" if pack.code == "ja" else f"{pack.summary_heading} / 総論"
-        sections = generate_sections(
-            prompt,
-            category,
-            pack,
-            main_heading=main_heading,
-            combined_snippet=combined_index_text,
-            section_snippet=section_snippet,
-            knowledge_text=knowledge_text,
-            subcategory=subcategory,
-        )
-        title = pack.title_template.format(category=category or "")
-        outro = build_outro(common_text, pack)
-        summary = summarize_index_with_llm(
-            prompt=prompt,
-            category=category,
-            pack=pack,
-            index_text=combined_index_text,
-        )
-        summary_section = _build_summary_section(
-            summary=summary,
-            outro=outro,
-            pack=pack,
-            category=category,
-            heading=summary_heading,
-        )
-        main_body, summary_body = _enforce_total_char_limit(
-            sections[0].body,
-            summary_section.body,
-        )
-        sections[0] = Section(
-            heading=sections[0].heading,
-            body=main_body,
-            diagram_html=sections[0].diagram_html,
-            chart_note=sections[0].chart_note,
-        )
-        summary_section = Section(
-            heading=summary_section.heading,
-            body=summary_body,
-            diagram_html=summary_section.diagram_html,
-            chart_note=summary_section.chart_note,
-        )
-        persona_description = _build_persona_description(prompt, category, pack)
-        persona_tags = _build_persona_tags(prompt, category, pack)
-        return compose_html(
-            title,
-            pack.description,
-            pack.intro,
-            sections,
-            summary_section,
-            padding_phrase=pack.padding_phrase,
-            persona_description=persona_description,
-            persona_tags=persona_tags,
-            lang_code=pack.code,
-        )
+    parts.append("<hr />")
+    parts.append("<section class='meta'>")
+    parts.append("<h3>タイトル</h3>")
+    parts.append(f"<p>{html.escape(title)}</p>")
+    parts.append("<h3>ディスクリプション</h3>")
+    parts.append(f"<p>{_format_html_text(description)}</p>")
+    parts.append("<h3>タグ</h3>")
+    parts.append(f"<p>{html.escape(meta_tags_line)}</p>")
+    parts.append("</section>")
+
+    parts.append("</article>")
+    parts.append("</body>")
+    parts.append("</html>")
+
+    return "\n".join(parts)
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Generate persona-focused blog HTML from a prompt.")
-    parser.add_argument("prompt", nargs="?", help="Client-provided theme or text. If omitted, read from stdin.")
-    parser.add_argument(
-        "-d",
-        "--output-dir",
-        type=Path,
-        default=DEFAULT_OUTPUT_DIR,
-        help="Directory to save the generated HTML files for each language.",
-    )
-    return parser.parse_args()
+# ======================= メインパイプライン ===================
 
 
 def _slugify(text: str) -> str:
@@ -1478,91 +894,132 @@ def _slugify(text: str) -> str:
     return slug[:64] or "blog"
 
 
-def generate_blogs(prompt: str, output_dir: Path = DEFAULT_OUTPUT_DIR) -> dict[str, object]:
-    """Generate and persist multilingual blogs, returning metadata and HTML bodies."""
-
+def generate_blogs(prompt: str, output_dir: Path = DEFAULT_OUTPUT_DIR) -> dict[str, Any]:
+    """仕様に沿って日本語ブログを1本生成し、HTMLを保存してメタ情報を返す。"""
     with status_scope("generate_blogs"):
-        if WARM_MODELS:
-            warm_model(CLASSIFIER_MODEL)
-            warm_model(SECTION_MODEL)
-            if ENABLE_CHART_LLM:
-                warm_model(CHART_MODEL)
-
         taxonomy = discover_article_taxonomy(ARTICLES_DIR)
-        available_categories = list(taxonomy) or list(DEFAULT_SCRIPT_CATEGORIES)
+        categories = list(taxonomy)
 
-        category_files = discover_category_files(INDEX_DIR, available_categories, taxonomy=taxonomy)
-        category_snippets = {name: read_snippet([path]) for name, path in category_files.items()}
-        category = classify_with_llm(prompt, category_snippets, categories=available_categories) or choose_category(
-            prompt, category_snippets, categories=available_categories
-        )
-
-        section_snippet = ""
-        subcategory: str | None = None
-        if category in taxonomy:
-            sub_paths = taxonomy.get(category, [])
-            sub_snippets = {
-                (sub_path.stem if sub_path.is_file() else sub_path.name): read_snippet([sub_path]) for sub_path in sub_paths
+        if not categories:
+            return {
+                "ok": False,
+                "flag": "NO_CATEGORY",
+                "message": "articles ディレクトリにカテゴリが見つかりません。",
+                "category": "",
+                "subcategory": "",
+                "files": {},
+                "html": {},
+                "llm_calls": LLM_CALL_COUNT,
             }
-            subcategory = choose_subcategory(prompt, sub_snippets)
-            if subcategory:
-                section_snippet = sub_snippets.get(subcategory, "")
-            elif sub_snippets:
-                subcategory = next(iter(sub_snippets))
-                section_snippet = sub_snippets.get(subcategory, "")
-        else:
-            section_snippet = category_snippets.get(category, "")
 
-        common_candidates = [INDEX_DIR / name for name in COMMON_FILES] + [INDEX_DIR / (name + ".txt") for name in COMMON_FILES]
-        knowledge_candidates = [MYBRAIN_DIR] + common_candidates
-        common_text = read_snippet(common_candidates)
-        knowledge_text = read_snippet(knowledge_candidates)
+        # 1. カテゴリ分類（LLM + フォールバック）
+        category = classify_category_with_llm(prompt, categories)
+        if not category:
+            category = choose_category_fallback(prompt, categories)
 
+        if not category:
+            return {
+                "ok": False,
+                "flag": "NO_CATEGORY",
+                "message": "読者の文章に対応するカテゴリが見つかりませんでした。",
+                "category": "",
+                "subcategory": "",
+                "files": {},
+                "html": {},
+                "llm_calls": LLM_CALL_COUNT,
+            }
+
+        # 2. カテゴリ配下のインデックスを読む（長すぎる場合は先頭 15,000 文字で打ち切り）
+        index_text = ""
+        for p in taxonomy.get(category, []):
+            index_text += "\n\n" + read_snippet(p, max_chars=15000)
+        cleaned_index_text = _clean_text(index_text)
+
+        # 3. mybrain（知識ファイル）を読む（同様に 15,000 文字に制限）
+        knowledge_text = read_snippet(MYBRAIN_DIR, max_chars=15000)
+        cleaned_knowledge_text = _clean_text(knowledge_text)
+
+        # 4. セクション設計（短い抜粋だけ渡す）
+        index_excerpt = cleaned_index_text[:1000]
+        knowledge_excerpt = cleaned_knowledge_text[:1000]
+        section_plan = plan_sections(prompt, category, index_excerpt, knowledge_excerpt)
+
+        # 5. 各セクション本文＋図解生成（7つ）
+        sections: list[Section] = []
+        for sec in section_plan:
+            title = sec.get("title", "")
+            focus = sec.get("focus", "")
+            section_obj = build_section(
+                prompt,
+                category,
+                title,
+                focus,
+                cleaned_index_text,
+                cleaned_knowledge_text,
+            )
+            sections.append(section_obj)
+
+        # 6. 総論
+        conclusion = build_conclusion(prompt, category, sections, cleaned_knowledge_text)
+
+        # 7. メタ情報
+        title, description, tags_line = build_meta(prompt, category, sections, conclusion)
+
+        # 8. HTML組み立て＆保存
         slug = _slugify(prompt)
         output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / f"{slug}_ja.html"
+        html_text = compose_html(title, description, sections, conclusion, tags_line)
+        output_path.write_text(html_text, encoding="utf-8")
 
-        packs = get_language_packs()
-        results: dict[str, object] = {
-            "category": category,
-            "subcategory": subcategory or "",
+        return {
+            "ok": True,
             "flag": "FLAG:FILES_SENT",
-            "slug": slug,
-            "files": {},
-            "html": {},
-            "llm_calls": 0,
+            "message": "",
+            "category": category,
+            "subcategory": "",
+            "files": {"ja": str(output_path)},
+            "html": {"ja": html_text},
+            "llm_calls": LLM_CALL_COUNT,
         }
 
-        for pack in packs:
-            article_html = build_article(
-                prompt,
-                pack,
-                category=category,
-                common_text=common_text,
-                category_snippet=category_snippets.get(category, ""),
-                section_snippet=section_snippet,
-                knowledge_text=knowledge_text,
-                subcategory=subcategory,
-            )
-            output_path = output_dir / f"{slug}_{pack.code}.html"
-            output_path.write_text(article_html, encoding="utf-8")
-            results["files"][pack.code] = str(output_path)
-            results["html"][pack.code] = article_html
 
-        results["llm_calls"] = LLM_CALL_COUNT
-
-        return results
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Generate Japanese blog HTML from a prompt.")
+    parser.add_argument("prompt", nargs="?", help="Client-provided theme or text. If omitted, read from stdin.")
+    parser.add_argument(
+        "-d",
+        "--output-dir",
+        type=Path,
+        default=DEFAULT_OUTPUT_DIR,
+        help="Directory to save the generated HTML file.",
+    )
+    return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     prompt = args.prompt or html.unescape(os.sys.stdin.read()).strip()
     if not prompt:
-        raise SystemExit("クライアントの文章が指定されていません")
+        raise SystemExit("読者からの文章が指定されていません。")
 
+    start = time.time()
     results = generate_blogs(prompt, output_dir=args.output_dir)
-    for code, path in results.get("files", {}).items():
-        print(f"Saved blog HTML ({code}) to {path}")
+    elapsed = time.time() - start
 
+    if not results.get("ok", True):
+        print(results.get("flag", "NO_CATEGORY"))
+        msg = results.get("message")
+        if msg:
+            print(msg)
+        print(f"LLM calls: {results.get('llm_calls', 0)}  elapsed: {elapsed:.1f}s")
+        return
+
+    files = results.get("files", {})
+    for lang, path in files.items():
+        print(f"Saved blog HTML ({lang}) to {path}")
+
+    print(f"LLM calls: {results.get('llm_calls', 0)}  elapsed: {elapsed:.1f}s")
     print(results.get("flag", "FLAG:FILES_SENT"))
 
 
