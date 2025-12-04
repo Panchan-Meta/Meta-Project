@@ -101,15 +101,22 @@ def _is_relative_to(path: Path, other: Path) -> bool:
         return False
 
 
-def _read_text_files(base_dir: Path, *, exclude_dirs: set[Path] | None = None) -> list[tuple[Path, str]]:
-    """Collect text files under the given directory, excluding specified folders."""
+def _read_text_files(
+    base_dir: Path,
+    *,
+    exclude_dirs: set[Path] | None = None,
+    suffixes: tuple[str, ...] = (".txt", ".md"),
+) -> list[tuple[Path, str]]:
+    """Collect text-like files under the given directory, excluding specified folders."""
 
     exclude_dirs = exclude_dirs or set()
     if not base_dir.exists():
         return []
 
     results: list[tuple[Path, str]] = []
-    for path in sorted(base_dir.rglob("*.txt")):
+    for path in sorted(base_dir.rglob("*")):
+        if path.suffix.lower() not in suffixes:
+            continue
         if any(_is_relative_to(path, excluded) for excluded in exclude_dirs):
             continue
         try:
@@ -137,22 +144,73 @@ def _load_persona_text() -> str:
     )
 
 
+def _load_index_json_entries() -> list[dict[str, object]]:
+    """Load structured index entries from index.json if available."""
+
+    json_path = INDEX_ROOT / "index.json"
+    if not json_path.exists():
+        return []
+
+    try:
+        data = json.loads(json_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+    entries: list[dict[str, object]] = []
+    if isinstance(data, list):
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            entries.append(
+                {
+                    "title": item.get("title", ""),
+                    "summary": item.get("summary", ""),
+                    "published": item.get("published", ""),
+                    "path": "index.json",
+                    "url": item.get("url", ""),
+                }
+            )
+
+    return entries
+
+
+def _format_index_entry(entry: dict[str, object]) -> str:
+    """Format an index entry for embedding in the LLM prompt."""
+
+    lines = [f"- タイトル: {entry.get('title', '')}"]
+    if entry.get("path"):
+        lines.append(f"- ファイル: {entry.get('path')}")
+    if entry.get("url"):
+        lines.append(f"- URL: {entry.get('url')}")
+    if entry.get("summary"):
+        lines.append(f"- 要約: {entry.get('summary')}")
+    if entry.get("published"):
+        lines.append(f"- 最終更新: {entry.get('published')}")
+    return "\n".join(lines)
+
+
 def _load_index_text() -> str:
     """Return combined index text (excluding the knowledge base directory)."""
 
     index_files = _read_text_files(INDEX_ROOT, exclude_dirs={PERSONA_ROOT})
-    if not index_files:
-        return ""
+    json_entries = _load_index_json_entries()
 
-    return "\n\n".join(
-        f"[{path.relative_to(INDEX_ROOT)}]\n{content}" for path, content in index_files
-    )
+    chunks: list[str] = []
+    for path, content in index_files:
+        chunks.append(f"[{path.relative_to(INDEX_ROOT)}]\n{content}")
+
+    if json_entries:
+        formatted_entries = "\n\n".join(_format_index_entry(entry) for entry in json_entries)
+        chunks.append(f"[index.json]\n{formatted_entries}")
+
+    return "\n\n".join(chunks)
 
 
 def _load_index_entries() -> list[dict[str, object]]:
     """Represent index entries from text files for keyword matching."""
 
     entries: list[dict[str, object]] = []
+
     for path, content in _read_text_files(INDEX_ROOT, exclude_dirs={PERSONA_ROOT}):
         try:
             modified = datetime.fromtimestamp(path.stat().st_mtime).isoformat()
@@ -167,6 +225,8 @@ def _load_index_entries() -> list[dict[str, object]]:
                 "path": str(path.relative_to(INDEX_ROOT)),
             }
         )
+
+    entries.extend(_load_index_json_entries())
 
     return entries
 
