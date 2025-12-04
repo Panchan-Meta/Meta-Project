@@ -5,9 +5,14 @@ from __future__ import annotations
 import cgi
 import io
 import json
+import sys
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+
+CURRENT_DIR = Path(__file__).resolve().parent
+if str(CURRENT_DIR) not in sys.path:
+    sys.path.insert(0, str(CURRENT_DIR))
 
 import client_instruction_responder as cir
 
