@@ -1,0 +1,444 @@
+"""Generate an English HTML article from the latest index entry.
+
+This script listens for the client instruction "pick one latest article and
+create it" (in English) and responds by selecting a random entry from the
+most recently modified index file. It then builds the standardized prompt for
+Codex's writing workflow (headline+summary expansion into an HTML article with a
+diagram) and optionally calls a configured LLM to generate the output.
+
+Features
+--------
+- Detect client intent from a free-form message.
+- Locate the newest index file under the articles directory.
+- Parse index content in JSON/JSONL or plain-text formats to extract headline
+  and summary pairs.
+- Randomly select one entry and construct the client-facing prompt.
+- Optional HTTP API for integration with other services.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import random
+import textwrap
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from typing import Any, Iterable, Mapping
+
+import requests
+
+BASE_DIR = Path("/var/www/Meta-Project/indexes/articles")
+DEFAULT_MODEL = os.environ.get("LATEST_ARTICLE_MODEL", "phi3:mini")
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate")
+LLM_TIMEOUT = int(os.environ.get("LLM_TIMEOUT", "600"))
+DEFAULT_SERVER_PORT = int(os.environ.get("LATEST_ARTICLE_SERVER_PORT", "8010"))
+
+
+class IndexEntry:
+    """Lightweight representation of an article candidate."""
+
+    def __init__(self, headline: str, summary: str, *, source: str = "") -> None:
+        self.headline = headline.strip()
+        self.summary = summary.strip()
+        self.source = source
+
+    def is_valid(self) -> bool:
+        return bool(self.headline and self.summary)
+
+    def to_dict(self) -> dict[str, str]:
+        return {"headline": self.headline, "summary": self.summary, "source": self.source}
+
+
+def is_latest_article_request(message: str) -> bool:
+    """Return True if the message asks to pick and create the latest article.
+
+    The detection is intentionally permissive to accommodate minor wording
+    variations (e.g., "latest article", "pick one of the newest posts").
+    """
+
+    lowered = message.lower()
+    keywords = ["latest article", "newest article", "pick up the latest", "one latest article"]
+    return any(key in lowered for key in keywords)
+
+
+def find_latest_index_file(index_dir: Path = BASE_DIR) -> Path:
+    """Return the newest index file under the given directory.
+
+    Supported extensions: .json, .jsonl, .ndjson, .txt
+    """
+
+    candidates = [
+        path
+        for ext in ("*.json", "*.jsonl", "*.ndjson", "*.txt")
+        for path in index_dir.glob(ext)
+        if path.is_file()
+    ]
+    if not candidates:
+        raise FileNotFoundError(f"No index files found in {index_dir}")
+
+    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
+def _normalize_mapping(entry: Mapping[str, Any], *, source: str) -> IndexEntry | None:
+    title = str(entry.get("headline") or entry.get("title") or entry.get("name") or "").strip()
+    summary = str(entry.get("summary") or entry.get("description") or entry.get("content") or "").strip()
+    if not title and "article" in entry:
+        nested = entry.get("article")
+        if isinstance(nested, Mapping):
+            title = str(nested.get("headline") or nested.get("title") or "")
+            summary = str(nested.get("summary") or nested.get("description") or "")
+    candidate = IndexEntry(title, summary, source=source)
+    return candidate if candidate.is_valid() else None
+
+
+def _parse_json_payload(payload: Any, *, source: str) -> list[IndexEntry]:
+    if isinstance(payload, list):
+        return [entry for item in payload if (entry := _normalize_mapping(item, source=source))]
+    if isinstance(payload, Mapping):
+        entries: list[IndexEntry] = []
+        if "entries" in payload and isinstance(payload["entries"], Iterable):
+            entries.extend(
+                entry
+                for item in payload["entries"]
+                if isinstance(payload["entries"], Iterable)
+                and (entry := _normalize_mapping(item, source=source))
+            )
+        if not entries:
+            maybe = _normalize_mapping(payload, source=source)
+            entries.extend([maybe] if maybe else [])
+        return entries
+    return []
+
+
+def load_index_entries(index_file: Path) -> list[IndexEntry]:
+    """Parse the index file into a list of IndexEntry objects."""
+
+    text = index_file.read_text(encoding="utf-8", errors="replace").strip()
+    entries: list[IndexEntry] = []
+
+    # JSON or JSON Lines
+    try:
+        payload = json.loads(text)
+        entries.extend(_parse_json_payload(payload, source=index_file.name))
+    except json.JSONDecodeError:
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+                entries.extend(_parse_json_payload(payload, source=index_file.name))
+                continue
+            except json.JSONDecodeError:
+                pass
+            entry = IndexEntry(headline=line[:120], summary=line, source=index_file.name)
+            if entry.is_valid():
+                entries.append(entry)
+
+    return entries
+
+
+def choose_random_entry(entries: list[IndexEntry]) -> IndexEntry:
+    if not entries:
+        raise ValueError("No valid entries found in the index file")
+    return random.choice(entries)
+
+
+def build_generation_prompt(headline: str, summary: str) -> str:
+    """Build the standardized prompt for the LLM."""
+
+    return textwrap.dedent(
+        f"""
+        You are a professional writing assistant used by a client-facing system called Codex.
+        All client instructions will be given in English. Always respond in English.
+
+        The client will interact with you in three main ways:
+
+        1) Article expansion from headline + summary (Pattern ①)
+
+        The client will provide:
+
+        A headline (English)
+
+        A summary of approximately 500–1000 characters (English)
+
+        Your task:
+
+        Produce an English response of about 2,000 characters expanding on the summary.
+
+        Maintain coherence and depth that are consistent with the given headline and summary.
+
+        Use concise, informative, professional language suitable for a client-facing deliverable.
+
+        Include a clear diagram to illustrate key relationships, structures, or flows.
+
+        The diagram should be represented using ASCII art or well-structured bullet lists.
+
+        Your response format:
+
+        A polished narrative (~2,000 characters) that meaningfully expands on the summary.
+
+        A diagram that visually explains the main concepts or processes.
+
+        A professional tone and an easy-to-follow structure with logical sections.
+
+        The client will explicitly provide the headline and the 500–1000 character summary before you generate the output.
+
+        2) Additional articles with the same pattern (Pattern ②)
+
+        The client may repeat the same type of request (headline + 500–1000 character summary) multiple times.
+        For each such request, treat it as a separate, independent article and apply exactly the same rules as in Pattern ①:
+
+        ~2,000-character English narrative
+
+        Coherent with the given headline and summary
+
+        Professional, concise, client-facing tone
+
+        Includes a clear ASCII or bullet-based diagram
+
+        Clear structure that is easy to follow
+
+        Again, the client will provide the headline and the 500–1000 character summary each time.
+
+        3) Overview from attached content (Pattern ③)
+
+        In some cases, the client will send you the full content created in Patterns ①/② as a file attachment (or as pasted text).
+
+        Your task in this pattern:
+
+        Read the provided content.
+
+        Write a general overview of approximately 1,500 characters in English.
+
+        The overview should:
+
+        Summarize the main themes, arguments, and conclusions.
+
+        Be understandable to someone who has not read the full article.
+
+        Maintain a professional, neutral, and clear tone.
+
+        Return only this ~1,500-character overview as your main textual output (no need to re-include the original article).
+
+        Output format for all patterns
+
+        For all responses (Patterns ①, ②, and ③), you must return the result as a complete HTML file, including at minimum:
+
+        @DOCTYPE html
+        <html lang="en">
+        <head>
+          <meta charset="UTF-8" />
+          <title>@-- Insert a short, appropriate title here --</title>
+        </head>
+        <body>
+          @-- Main content here --
+        </body>
+        </html>
+
+
+        Additional guidelines:
+
+        Place the main narrative content inside appropriate HTML elements (e.g., <h1>, <h2>, <p>, <ul>, <ol>).
+
+        Place the diagram inside <pre> or within structured lists, so formatting is preserved.
+
+        Do not include any non-HTML commentary outside the HTML structure.
+
+        Do not add explanations about your internal reasoning; only output the HTML requested.
+
+        Follow these instructions strictly for every response.
+
+        Please expand the following headline and summary into the requested HTML article.
+
+        Headline: {headline}
+        Summary:
+        {summary}
+        """
+    ).strip()
+
+
+def call_llm(prompt: str, *, model: str = DEFAULT_MODEL) -> str:
+    payload = {"model": model, "prompt": prompt, "stream": False}
+    resp = requests.post(OLLAMA_URL, json=payload, timeout=LLM_TIMEOUT)
+    resp.raise_for_status()
+    data = resp.json()
+    return str(data.get("response", "")).strip()
+
+
+class LatestArticleRequestHandler(BaseHTTPRequestHandler):
+    server_version = "LatestArticleServer/1.0"
+
+    def _read_body(self) -> dict[str, Any]:
+        length = int(self.headers.get("Content-Length", "0"))
+        data = self.rfile.read(length) if length else b""
+        try:
+            return json.loads(data.decode("utf-8")) if data else {}
+        except json.JSONDecodeError:
+            return {}
+
+    def _send_json(self, payload: Mapping[str, Any], *, status: int = HTTPStatus.OK) -> None:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self) -> None:  # noqa: N802 (HTTP verb casing)
+        if self.path != "/api/generate_latest_article":
+            self._send_json({"ok": False, "error": "not_found"}, status=HTTPStatus.NOT_FOUND)
+            return
+
+        data = self._read_body()
+        message = str(data.get("message", "")).strip() if isinstance(data, Mapping) else ""
+        model = str(data.get("model", DEFAULT_MODEL)).strip() or DEFAULT_MODEL
+        no_call_flag = bool(data.get("no_call")) if isinstance(data, Mapping) else False
+        index_dir_raw = data.get("index_dir") if isinstance(data, Mapping) else None
+        index_dir = Path(str(index_dir_raw)) if index_dir_raw else BASE_DIR
+
+        if not message:
+            self._send_json({"ok": False, "error": "message_missing"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        if not is_latest_article_request(message):
+            self._send_json(
+                {"ok": False, "error": "not_latest_article_request", "message": message},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
+
+        try:
+            index_file = find_latest_index_file(index_dir)
+            entries = load_index_entries(index_file)
+            chosen = choose_random_entry(entries)
+            prompt = build_generation_prompt(chosen.headline, chosen.summary)
+        except Exception as exc:  # noqa: BLE001
+            self._send_json(
+                {"ok": False, "error": "index_error", "message": str(exc)},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+            return
+
+        if no_call_flag:
+            self._send_json(
+                {
+                    "ok": True,
+                    "called_llm": False,
+                    "prompt": prompt,
+                    "model": model,
+                    "selected": chosen.to_dict(),
+                    "index_file": str(index_file),
+                }
+            )
+            return
+
+        try:
+            response_text = call_llm(prompt, model=model)
+        except Exception as exc:  # noqa: BLE001
+            self._send_json(
+                {
+                    "ok": False,
+                    "error": "llm_request_failed",
+                    "message": str(exc),
+                    "prompt": prompt,
+                    "selected": chosen.to_dict(),
+                },
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+            return
+
+        self._send_json(
+            {
+                "ok": True,
+                "called_llm": True,
+                "prompt": prompt,
+                "response": response_text,
+                "model": model,
+                "selected": chosen.to_dict(),
+                "index_file": str(index_file),
+            }
+        )
+
+
+def handle_message(
+    message: str,
+    *,
+    index_dir: Path = BASE_DIR,
+    model: str = DEFAULT_MODEL,
+    no_call: bool = False,
+) -> dict[str, Any]:
+    """Process a single client message and optionally call the LLM."""
+
+    if not is_latest_article_request(message):
+        raise ValueError("Client message does not request the latest article")
+
+    index_file = find_latest_index_file(index_dir)
+    entries = load_index_entries(index_file)
+    chosen = choose_random_entry(entries)
+    prompt = build_generation_prompt(chosen.headline, chosen.summary)
+
+    if no_call:
+        return {
+            "ok": True,
+            "called_llm": False,
+            "prompt": prompt,
+            "model": model,
+            "selected": chosen.to_dict(),
+            "index_file": str(index_file),
+        }
+
+    response_text = call_llm(prompt, model=model)
+    return {
+        "ok": True,
+        "called_llm": True,
+        "prompt": prompt,
+        "response": response_text,
+        "model": model,
+        "selected": chosen.to_dict(),
+        "index_file": str(index_file),
+    }
+
+
+def run_server(port: int = DEFAULT_SERVER_PORT, *, index_dir: Path = BASE_DIR) -> None:
+    """Start the HTTP server for client integration."""
+
+    class _Handler(LatestArticleRequestHandler):
+        INDEX_DIR = index_dir
+
+    HTTPServer(("", port), _Handler).serve_forever()
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--message", help="Client message requesting the latest article")
+    parser.add_argument("--index-dir", type=Path, default=BASE_DIR, help="Directory containing index files")
+    parser.add_argument("--model", default=DEFAULT_MODEL, help="LLM model name")
+    parser.add_argument("--no-call", action="store_true", help="Do not call the LLM; only print the prompt")
+    parser.add_argument("--serve", action="store_true", help="Run as an HTTP server")
+    parser.add_argument("--port", type=int, default=DEFAULT_SERVER_PORT, help="Port for the HTTP server")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    if args.serve:
+        run_server(port=args.port, index_dir=args.index_dir)
+        return
+
+    if not args.message:
+        raise SystemExit("--message is required unless --serve is used")
+
+    result = handle_message(
+        args.message,
+        index_dir=args.index_dir,
+        model=args.model,
+        no_call=args.no_call,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+if __name__ == "__main__":
+    main()
