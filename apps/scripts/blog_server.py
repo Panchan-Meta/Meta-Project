@@ -5,16 +5,16 @@ from __future__ import annotations
 import cgi
 import io
 import json
+import sys
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-from client_instruction_responder import (
-    DEFAULT_API_BASE,
-    DEFAULT_MODEL,
-    DEFAULT_PROVIDER,
-    respond_to_instruction,
-)
+CURRENT_DIR = Path(__file__).resolve().parent
+if str(CURRENT_DIR) not in sys.path:
+    sys.path.insert(0, str(CURRENT_DIR))
+
+import client_instruction_responder as cir
 
 UPLOAD_DIR = Path("/var/www/Meta-Project/data/client")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -120,9 +120,9 @@ class BlogRequestHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": "prompt_missing"}, status=HTTPStatus.BAD_REQUEST)
             return
 
-        model = DEFAULT_MODEL
-        provider = DEFAULT_PROVIDER
-        api_base = DEFAULT_API_BASE
+        model = cir.DEFAULT_MODEL
+        provider = cir.DEFAULT_PROVIDER
+        api_base = cir.DEFAULT_API_BASE
         filename = None
         if isinstance(json_body, dict):
             model = str(json_body.get("model", model))
@@ -131,7 +131,7 @@ class BlogRequestHandler(BaseHTTPRequestHandler):
             filename = str(json_body.get("filename")) if json_body.get("filename") else None
 
         try:
-            result = respond_to_instruction(
+            result = cir.respond_to_instruction(
                 prompt_text,
                 model=model,
                 provider=provider,
