@@ -50,7 +50,7 @@ LLM_TIMEOUT = int(os.environ.get("LLM_TIMEOUT", "600"))
 SECTION_MODEL = os.environ.get("BLOG_BUILDER_SECTION_MODEL", "phi3:mini")
 CLASSIFIER_MODEL = os.environ.get("BLOG_BUILDER_CLASSIFIER_MODEL", "phi3:mini")
 
-MIN_SECTION_CHARS = 1500
+MIN_SECTION_CHARS = 2000
 SUMMARY_TARGET_CHARS = 1500
 
 LLM_CALL_COUNT = 0
@@ -978,10 +978,10 @@ def generate_english_section_body(
         Modeling plan inferred earlier:
         {modeling_summary}
 
-        Evidence snippets (objective data):
+        Evidence snippets (objective data from the latest index files only):
         {index_snippet or "(no direct evidence available)"}
 
-        Background knowledge (Johanne's interpretation):
+        Background knowledge (Johanne's interpretation, use only if it aligns with the latest index evidence):
         {knowledge_snippet or "(no additional notes)"}
 
         Write the full section body in English.
@@ -989,6 +989,7 @@ def generate_english_section_body(
         Requirements:
         - Honor the modeling plan and weave the angles into a single, cohesive narrative arc.
         - Write at least {MIN_SECTION_CHARS} characters and keep sentences complete. Do not truncate or leave paragraphs hanging.
+        - Base factual statements strictly on the most recent information contained in the provided index snippets; if something is missing, acknowledge the gap instead of speculating.
         - If a fact is uncertain, mark it as uncertain and move on without speculation. Never invent claims such as "Berkshire proposed an NFT theory in 1977".
         - Do not mention the words "データソース", "mybrain", "インデックス", or "クライアント".
         - Keep a calm tone, thoughtful and reflective.
@@ -1376,15 +1377,16 @@ def build_meta(
     category: str,
     sections: list[Section],
     conclusion: Mapping[str, str],
+    index_excerpt: str,
 ) -> dict[str, dict[str, str]]:
-    """各言語のタイトル・ディスクリプション・タグ6個を1回で生成。"""
+    """各言語のタイトル・ディスクリプション・タグ6個と要約を1回で生成。"""
 
     def _sections_excerpt(lang: str) -> str:
         return "\n\n".join(f"[{i+1}] {s.titles.get(lang, s.titles.get('ja', ''))}" for i, s in enumerate(sections))
 
     system = (
         "あなたは多言語のブログ編集者です。"
-        "記事本文と総論から内容を推測し、タイトル・ディスクリプション・タグ6つを日本語・英語・イタリア語で設計してください。"
+        "記事本文と総論から内容を推測し、タイトル・ディスクリプション・タグ6つ、要約を日本語・英語・イタリア語で設計してください。"
     )
 
     body = textwrap.dedent(
@@ -1393,6 +1395,9 @@ def build_meta(
         {prompt}
 
         カテゴリ: {category}
+
+        インデックスの最新情報抜粋:
+        {index_excerpt}
 
         セクション一覧（日本語ベース）:
         {_sections_excerpt('ja')}
@@ -1403,9 +1408,9 @@ def build_meta(
         出力フォーマット（JSONのみ）:
         {{
           "meta": {{
-            "ja": {{"title": "タイトル", "description": "200文字の説明", "tags": {{"big": [], "normal": [], "small": []}}}},
-            "en": {{"title": "Title in English", "description": "~200 chars", "tags": {{"big": [], "normal": [], "small": []}}}},
-            "it": {{"title": "Titolo in italiano", "description": "~200 caratteri", "tags": {{"big": [], "normal": [], "small": []}}}}
+            "ja": {{"title": "タイトル", "description": "200文字の説明", "summary": "内容の要約", "tags": {{"big": [], "normal": [], "small": []}}}},
+            "en": {{"title": "Title in English", "description": "~200 chars", "summary": "Concise summary using index info", "tags": {{"big": [], "normal": [], "small": []}}}},
+            "it": {{"title": "Titolo in italiano", "description": "~200 caratteri", "summary": "Riassunto conciso", "tags": {{"big": [], "normal": [], "small": []}}}}
           }}
         }}
 
@@ -1413,6 +1418,7 @@ def build_meta(
         - 各言語で同じ内容・ニュアンスを保つ。
         - タイトル・ディスクリプション・タグに「インデックス」「クライアント」という語を含めない。
         - ディスクリプションは200文字を目安にし、210文字以内。
+        - 要約はインデックスの最新情報に基づいて簡潔に書く。
         - タグは合計6個（big2, normal2, small2）。
         - 特定サービスの宣伝ワードは禁止。中立的なキーワードにする。
         - 確認できない年代・主張（例: Berkshireが1977年にNFT理論を提案）は書かない。事実ベースで構成する。
@@ -1429,10 +1435,13 @@ def build_meta(
     if len(base_desc) > 200:
         base_desc = base_desc[:200].rstrip() + "…"
 
+    base_summary = _sanitize_output_text(index_excerpt[:320] or conclusion.get("en", ""))
+
     fallback_meta = {
         lang: {
             "title": _sanitize_output_text(base_title),
             "description": _sanitize_output_text(base_desc),
+            "summary": base_summary,
             "tags": "PunkRock,NFT",
         }
         for lang in ("ja", "en", "it")
@@ -1460,7 +1469,9 @@ def build_meta(
             all_tags = big[:2] + normal[:2] + small[:2]
             tags_line = ",".join(_sanitize_output_text(tag) for tag in all_tags) or fallback_meta[lang]["tags"]
 
-            result[lang] = {"title": title, "description": description, "tags": tags_line}
+            summary_text = _sanitize_output_text(str(meta.get("summary", "") or base_summary))
+
+            result[lang] = {"title": title, "description": description, "summary": summary_text, "tags": tags_line}
         return result
     except Exception:
         return fallback_meta
@@ -1480,12 +1491,12 @@ def compose_html(
     """指定言語の最終 HTML を組み立てる。"""
     title = meta["title"]
     description = meta["description"]
-    tags_line = meta["tags"]
+    summary = meta.get("summary", description)
 
     labels = {
-        "ja": {"chapter": "第{num}章", "summary": "総論", "tags": "タグ", "description": "ディスクリプション"},
-        "en": {"chapter": "Chapter {num}", "summary": "Conclusion", "tags": "Tags", "description": "Description"},
-        "it": {"chapter": "Capitolo {num}", "summary": "Conclusione", "tags": "Tag", "description": "Descrizione"},
+        "ja": {"chapter": "セクション {num}", "summary": "総論", "title": "Title", "summary_label": "Summary"},
+        "en": {"chapter": "Section {num}", "summary": "Overall Conclusion", "title": "Title", "summary_label": "Summary"},
+        "it": {"chapter": "Sezione {num}", "summary": "Conclusione Generale", "title": "Title", "summary_label": "Summary"},
     }
     lbl = labels.get(lang, labels["en"])
 
@@ -1512,6 +1523,8 @@ def compose_html(
         .rich-diagram table { width: 100%; border-collapse: collapse; }
         .rich-diagram th, .rich-diagram td { border: 1px solid #d8defc; padding: 0.35rem 0.45rem; text-align: left; }
         .rich-diagram th { background: #eef1ff; }
+        .intro-block { background: #f0f4ff; border: 1px solid #d6defa; padding: 1rem; border-radius: 8px; margin-bottom: 1rem; }
+        .intro-block strong { display: block; font-size: 1.1rem; margin-bottom: 0.25rem; }
         </style>
         """
     )
@@ -1527,11 +1540,13 @@ def compose_html(
     parts.append("<body>")
     parts.append("<article>")
 
-    parts.append(f"<h1>{html.escape(title)}</h1>")
-    parts.append(f"<p class='description'>{_format_html_text(description)}</p>")
+    parts.append("<section class='intro-block'>")
+    parts.append(f"<p><strong>{html.escape(lbl['title'])}:</strong> {html.escape(title)}</p>")
+    parts.append(f"<p><strong>{html.escape(lbl['summary_label'])}:</strong> {_format_html_text(summary)}</p>")
+    parts.append("</section>")
 
     for i, sec in enumerate(sections, start=1):
-        heading = html.escape(lbl["chapter"].format(num=i) + " " + sec.titles.get(lang, sec.titles.get("ja", "")))
+        heading = html.escape(lbl["chapter"].format(num=i) + ": " + sec.titles.get(lang, sec.titles.get("ja", "")))
         parts.append("<section>")
         parts.append(f"<h2>{heading}</h2>")
         parts.append(f"<p>{_format_html_text(sec.bodies.get(lang, sec.bodies.get('ja', '')))}</p>")
@@ -1543,14 +1558,6 @@ def compose_html(
     parts.append("<section>")
     parts.append(f"<h2>{html.escape(lbl['summary'])}</h2>")
     parts.append(f"<p>{_format_html_text(conclusion.get(lang, conclusion.get('ja', '')))}</p>")
-    parts.append("</section>")
-
-    parts.append("<hr />")
-    parts.append("<section class='meta'>")
-    parts.append(f"<h3>{html.escape(lbl['description'])}</h3>")
-    parts.append(f"<p>{_format_html_text(description)}</p>")
-    parts.append(f"<h3>{html.escape(lbl['tags'])}</h3>")
-    parts.append(f"<p>{html.escape(tags_line)}</p>")
     parts.append("</section>")
 
     parts.append("</article>")
@@ -1876,7 +1883,7 @@ def generate_blogs(prompt: str, output_dir: Path = DEFAULT_OUTPUT_DIR) -> dict[s
         conclusion = build_conclusion(prompt, category, sections, cleaned_knowledge_text)
 
         # 7. メタ情報（3言語まとめて）
-        meta_info = build_meta(prompt, category, sections, conclusion)
+        meta_info = build_meta(prompt, category, sections, conclusion, index_excerpt)
 
         # 8. HTML組み立て＆保存（日本語・英語・イタリア語）
         slug = _slugify(prompt)
