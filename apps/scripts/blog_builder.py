@@ -170,10 +170,13 @@ def _is_llm_error(text: str | None) -> bool:
 # ======================= テキストユーティリティ ==============
 
 
-def _clean_text(text: str) -> str:
+def _clean_text(text: str | Any) -> str:
     """HTML/PDF ノイズや宣伝行をざっくり除去してプレーンテキスト化。"""
     if not text:
         return ""
+
+    if not isinstance(text, str):
+        text = str(text)
 
     cleaned = text.replace("\ufeff", "").replace("\ufffd", "")
     cleaned = re.sub(r"�+", "", cleaned)
@@ -249,7 +252,7 @@ def _clean_text(text: str) -> str:
     return cleaned.strip()
 
 
-def _sanitize_output_text(text: str) -> str:
+def _sanitize_output_text(text: str | Any) -> str:
     """読者向けに出す本文などを最終整形する。
 
     - _clean_text でノイズ除去
@@ -258,6 +261,9 @@ def _sanitize_output_text(text: str) -> str:
     """
     if not text:
         return ""
+
+    if not isinstance(text, str):
+        text = str(text)
     text = _clean_text(text)
 
     lines: list[str] = []
