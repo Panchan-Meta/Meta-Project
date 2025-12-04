@@ -120,23 +120,42 @@ def load_index_entries(index_file: Path) -> list[IndexEntry]:
     entries: list[IndexEntry] = []
 
     # JSON or JSON Lines
-    try:
-        payload = json.loads(text)
-        entries.extend(_parse_json_payload(payload, source=index_file.name))
-    except json.JSONDecodeError:
-        for line in text.splitlines():
-            line = line.strip()
-            if not line:
+    if index_file.suffix.lower() in {".json", ".jsonl", ".ndjson"}:
+        try:
+            payload = json.loads(text)
+            entries.extend(_parse_json_payload(payload, source=index_file.name))
+        except json.JSONDecodeError:
+            for line in text.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    payload = json.loads(line)
+                    entries.extend(_parse_json_payload(payload, source=index_file.name))
+                    continue
+                except json.JSONDecodeError:
+                    pass
+                entry = IndexEntry(headline=line[:120], summary=line, source=index_file.name)
+                if entry.is_valid():
+                    entries.append(entry)
+
+    # Plain-text fallback: treat paragraphs as entries (first line = headline, rest = summary)
+    if not entries and text:
+        for block in (segment.strip() for segment in text.split("\n\n")):
+            if not block:
                 continue
-            try:
-                payload = json.loads(line)
-                entries.extend(_parse_json_payload(payload, source=index_file.name))
-                continue
-            except json.JSONDecodeError:
-                pass
-            entry = IndexEntry(headline=line[:120], summary=line, source=index_file.name)
+            lines = block.splitlines()
+            headline = lines[0][:120]
+            summary = "\n".join(lines[1:]).strip() or headline
+            entry = IndexEntry(headline=headline, summary=summary, source=index_file.name)
             if entry.is_valid():
                 entries.append(entry)
+
+    # Final fallback: use the entire text as a single entry to avoid surfacing parse errors
+    if not entries and text:
+        entry = IndexEntry(headline=text.splitlines()[0][:120], summary=text, source=index_file.name)
+        if entry.is_valid():
+            entries.append(entry)
 
     return entries
 
@@ -265,7 +284,15 @@ def call_llm(prompt: str, *, model: str = DEFAULT_MODEL) -> str:
     payload = {"model": model, "prompt": prompt, "stream": False}
     resp = requests.post(OLLAMA_URL, json=payload, timeout=LLM_TIMEOUT)
     resp.raise_for_status()
-    data = resp.json()
+    try:
+        data = resp.json()
+    except ValueError:
+        text = resp.text.strip()
+        if text:
+            return text
+        msg = "Empty or non-JSON response from LLM"
+        raise RuntimeError(msg) from None
+
     return str(data.get("response", "")).strip()
 
 
