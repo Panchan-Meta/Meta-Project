@@ -8,8 +8,11 @@ characters of polished English plus a diagram (ASCII or structured bullets).
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import textwrap
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Optional
 
@@ -18,6 +21,7 @@ import requests
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate")
 LLM_TIMEOUT = int(os.environ.get("LLM_TIMEOUT", "600"))
 DEFAULT_MODEL = os.environ.get("SUMMARY_EXPANDER_MODEL", "phi3:mini")
+DEFAULT_SERVER_PORT = int(os.environ.get("SUMMARY_EXPANDER_PORT", "8000"))
 
 
 def build_client_prompt(headline: str, summary: str) -> str:
@@ -75,11 +79,86 @@ def _read_summary(summary: Optional[str], summary_file: Optional[Path]) -> str:
     return summary_file.read_text(encoding="utf-8", errors="replace")
 
 
+class SummaryRequestHandler(BaseHTTPRequestHandler):
+    server_version = "SummaryExpanderServer/1.0"
+
+    def _read_body(self) -> dict[str, object]:
+        length = int(self.headers.get("Content-Length", "0"))
+        data = self.rfile.read(length) if length else b""
+        try:
+            return json.loads(data.decode("utf-8")) if data else {}
+        except json.JSONDecodeError:
+            return {}
+
+    def _send_json(self, payload: dict[str, object], status: int = HTTPStatus.OK) -> None:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self) -> None:  # noqa: N802 (HTTP verb casing)
+        if self.path != "/api/expand_summary":
+            self._send_json({"ok": False, "error": "not_found"}, status=HTTPStatus.NOT_FOUND)
+            return
+
+        data = self._read_body()
+        headline = str(data.get("headline", "")).strip() if isinstance(data, dict) else ""
+        summary = str(data.get("summary", "")).strip() if isinstance(data, dict) else ""
+        model = str(data.get("model", DEFAULT_MODEL)).strip() or DEFAULT_MODEL
+        no_call_flag = bool(data.get("no_call")) if isinstance(data, dict) else False
+
+        if not headline or not summary:
+            self._send_json({"ok": False, "error": "headline_or_summary_missing"}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        prompt = build_client_prompt(headline, summary)
+        if no_call_flag:
+            self._send_json({"ok": True, "prompt": prompt, "called_llm": False, "response": "", "model": model})
+            return
+
+        try:
+            response_text = call_llm(prompt, model=model)
+        except Exception as exc:  # noqa: BLE001
+            self._send_json(
+                {
+                    "ok": False,
+                    "error": "llm_request_failed",
+                    "message": str(exc),
+                    "prompt": prompt,
+                },
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+            return
+
+        self._send_json(
+            {"ok": True, "prompt": prompt, "response": response_text, "called_llm": True, "model": model}
+        )
+
+
+def run_server(host: str = "0.0.0.0", port: int = DEFAULT_SERVER_PORT) -> None:
+    server = HTTPServer((host, port), SummaryRequestHandler)
+    print(f"Serving summary expander on http://{host}:{port}/api/expand_summary")
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate or send a client LLM prompt")
-    parser.add_argument("--headline", required=True, help="Headline text for the deliverable")
+    parser.add_argument("--serve", action="store_true", help="Run an HTTP server for client requests")
+    parser.add_argument("--host", default="0.0.0.0", help="Host interface for --serve (default: 0.0.0.0)")
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=DEFAULT_SERVER_PORT,
+        help=f"Port for --serve (default: {DEFAULT_SERVER_PORT})",
+    )
+    parser.add_argument("--headline", help="Headline text for the deliverable")
 
-    summary_group = parser.add_mutually_exclusive_group(required=True)
+    summary_group = parser.add_mutually_exclusive_group(required=False)
     summary_group.add_argument("--summary", help="500–1000 character summary text")
     summary_group.add_argument("--summary-file", type=Path, help="Path to a file containing the summary")
 
@@ -89,11 +168,22 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Only print the constructed prompt without sending it to the LLM",
     )
-    return parser.parse_args()
+
+    args = parser.parse_args()
+    if not args.serve:
+        if not args.headline:
+            parser.error("--headline is required unless using --serve")
+        if args.summary is None and args.summary_file is None:
+            parser.error("either --summary or --summary-file is required unless using --serve")
+    return args
 
 
 def main() -> int:
     args = parse_args()
+    if args.serve:
+        run_server(host=args.host, port=args.port)
+        return 0
+
     summary_text = _read_summary(args.summary, args.summary_file)
     prompt = build_client_prompt(args.headline, summary_text)
 
