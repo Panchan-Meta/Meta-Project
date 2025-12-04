@@ -277,6 +277,22 @@ def _sanitize_output_text(text: str) -> str:
     return text.strip()
 
 
+def _safe_json_parse(text: str) -> dict[str, Any]:
+    """Extract the first JSON object from ``text`` and return it as a dict."""
+
+    if not text:
+        return {}
+
+    match = re.search(r"\{[\s\S]*\}", text)
+    if not match:
+        return {}
+
+    try:
+        return json.loads(match.group())
+    except json.JSONDecodeError:
+        return {}
+
+
 def _normalize_token(token: str) -> str:
     return re.sub(r"[\s_\-・、,。()（）\[\]]+", "", token).casefold()
 
@@ -1427,6 +1443,176 @@ def handle_latest_topic_request(prompt: str) -> dict[str, Any] | None:
             "html": {},
             "llm_calls": LLM_CALL_COUNT,
             "source_file": str(source_path),
+        }
+
+
+def build_three_stage_prompts(prompt: str) -> dict[str, str]:
+    """Create three LLM prompts for meta info, body+diagram, and conclusion."""
+
+    cleaned = prompt.strip()
+    meta_prompt = textwrap.dedent(
+        f"""
+        You are preparing a blog article based on the following English client instruction.
+        Respond with JSON only using these keys:
+        - title: a concise headline in English
+        - description: a 1-2 sentence description (limit to roughly 200 words)
+        - tags: an array of exactly 6 topical tags in English
+        - summary: a 3-5 sentence overview in English
+
+        Client instruction:
+        {cleaned}
+        """
+    ).strip()
+
+    body_prompt = textwrap.dedent(
+        f"""
+        Draft the main body of a blog article from the following English client instruction.
+        Return JSON only with these keys:
+        - body: a detailed explanation in English (aim for roughly 800-1200 words, paragraph-friendly)
+        - diagram: an ASCII diagram or structured bullet diagram that clarifies the core idea; keep it text-only
+
+        Client instruction:
+        {cleaned}
+        """
+    ).strip()
+
+    conclusion_prompt = textwrap.dedent(
+        f"""
+        Produce the closing section for a blog article based on the following English client instruction.
+        Return JSON only with this key:
+        - conclusion: a concise English conclusion that reinforces the article's message
+
+        Client instruction:
+        {cleaned}
+        """
+    ).strip()
+
+    return {"meta": meta_prompt, "body": body_prompt, "conclusion": conclusion_prompt}
+
+
+def compose_three_stage_html(
+    prompt: str, meta: Mapping[str, Any], body: Mapping[str, Any], conclusion_text: str
+) -> str:
+    """Compose HTML from meta/body/conclusion fields."""
+
+    title = _sanitize_output_text(str(meta.get("title") or prompt or "Blog Article"))
+    description = _sanitize_output_text(str(meta.get("description", "")))
+    summary = _sanitize_output_text(str(meta.get("summary", "")))
+    tags_raw = meta.get("tags") or []
+    tags = [
+        _sanitize_output_text(str(tag))
+        for tag in tags_raw
+        if isinstance(tag, (str, int, float)) and str(tag).strip()
+    ]
+    tags_line = ", ".join(tags[:6])
+
+    body_text = _sanitize_output_text(str(body.get("body", "")))
+    diagram_text = _sanitize_output_text(str(body.get("diagram", "")))
+    conclusion = _sanitize_output_text(conclusion_text)
+
+    parts: list[str] = []
+    parts.append("<!DOCTYPE html>")
+    parts.append("<html>")
+    parts.append("<head>")
+    parts.append("  <meta charset=\"utf-8\" />")
+    parts.append(f"  <title>{html.escape(title)}</title>")
+    parts.append(
+        "  <style>body{font-family:Arial,Helvetica,sans-serif;line-height:1.6;padding:24px;}\n"
+        "article{max-width:900px;margin:0 auto;}\nh1{margin-bottom:0.25em;}"
+        "section{margin-bottom:24px;}\npre{background:#f6f8fa;padding:12px;border-radius:8px;overflow:auto;}"
+        "ul.tag-list{list-style:none;padding:0;display:flex;flex-wrap:wrap;gap:8px;}"
+        "ul.tag-list li{background:#eef3ff;border-radius:12px;padding:6px 10px;font-size:0.9em;}"
+        "p.lead{font-weight:600;margin-top:0;}\n.small-label{color:#666;font-size:0.9em;}"
+        "</style>"
+    )
+    parts.append("</head>")
+    parts.append("<body>")
+    parts.append("<article>")
+
+    parts.append(f"<h1>{html.escape(title)}</h1>")
+    if description:
+        parts.append(f"<p class='lead'>{_format_html_text(description)}</p>")
+
+    parts.append("<section>")
+    parts.append("<h2>Summary</h2>")
+    parts.append(f"<p>{_format_html_text(summary or description)}</p>")
+    if tags_line:
+        parts.append("<ul class='tag-list'>")
+        for tag in tags[:6]:
+            parts.append(f"<li>{html.escape(tag)}</li>")
+        parts.append("</ul>")
+    parts.append("</section>")
+
+    parts.append("<section>")
+    parts.append("<h2>Body</h2>")
+    parts.append(f"<p>{_format_html_text(body_text)}</p>")
+    if diagram_text:
+        parts.append("<h3>Diagram</h3>")
+        parts.append(f"<pre>{html.escape(diagram_text)}</pre>")
+    parts.append("</section>")
+
+    parts.append("<section>")
+    parts.append("<h2>Conclusion</h2>")
+    parts.append(f"<p>{_format_html_text(conclusion)}</p>")
+    parts.append("</section>")
+
+    parts.append("<hr />")
+    parts.append("<p class='small-label'>Client instruction</p>")
+    parts.append(f"<p>{_format_html_text(_sanitize_output_text(prompt))}</p>")
+
+    parts.append("</article>")
+    parts.append("</body>")
+    parts.append("</html>")
+
+    return "\n".join(parts)
+
+
+def generate_three_stage_blog(prompt: str, output_dir: Path = DEFAULT_OUTPUT_DIR) -> dict[str, Any]:
+    """Generate HTML via three sequential LLM calls (meta/body/conclusion)."""
+
+    with status_scope("generate_three_stage_blog"):
+        prompts = build_three_stage_prompts(prompt)
+
+        meta_raw = _post_llm(SECTION_MODEL, prompts["meta"])
+        body_raw = _post_llm(SECTION_MODEL, prompts["body"])
+        conclusion_raw = _post_llm(SECTION_MODEL, prompts["conclusion"])
+
+        meta = _safe_json_parse(meta_raw)
+        if not meta:
+            meta = {
+                "title": prompt.strip()[:60] or "Blog Article",
+                "description": meta_raw,
+                "tags": [],
+                "summary": meta_raw,
+            }
+
+        body = _safe_json_parse(body_raw)
+        if not body:
+            body = {"body": body_raw, "diagram": ""}
+
+        conclusion_data = _safe_json_parse(conclusion_raw)
+        conclusion = conclusion_data.get("conclusion") if isinstance(conclusion_data, dict) else None
+        conclusion = conclusion or conclusion_raw
+
+        html_text = compose_three_stage_html(prompt, meta, body, conclusion)
+
+        slug = _slugify(prompt)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / f"{slug}_ja.html"
+        output_path.write_text(html_text, encoding="utf-8")
+
+        files = {"ja": str(output_path), "en": str(output_path)}
+        html_map = {"ja": html_text, "en": html_text}
+
+        return {
+            "ok": True,
+            "flag": "FLAG:FILES_SENT",
+            "message": "",
+            "category": None,
+            "subcategory": "",
+            "files": files,
+            "html": html_map,
+            "llm_calls": LLM_CALL_COUNT,
         }
 
 
