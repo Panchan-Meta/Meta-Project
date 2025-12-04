@@ -569,6 +569,238 @@ def build_section_body(
     return _sanitize_output_text(text)
 
 
+def infer_section_model(
+    prompt: str,
+    category: str,
+    section_title: str,
+    focus: str,
+    index_snippet: str,
+    knowledge_snippet: str,
+) -> dict[str, str]:
+    """セクションの概要をLLMに投げてモデリング方針を推論させる。"""
+
+    system = (
+        "あなたは事実確認を重視する編集者です。"
+        "与えられた概要と素材から、セクションの論旨・展開・必要な証拠のモデリングを行います。"
+    )
+
+    body = textwrap.dedent(
+        f"""
+        読者からの依頼文:
+        {prompt}
+
+        カテゴリ: {category}
+        セクションタイトル: {section_title}
+        セクションの焦点: {focus}
+
+        データソースから関連しそうな情報（客観情報）:
+        {index_snippet or "（利用可能な情報なし）"}
+
+        mybrain から関連しそうな情報（ヨハネの知識・解釈）:
+        {knowledge_snippet or "（利用可能な情報なし）"}
+
+        出力フォーマット（JSON のみ）:
+        {{
+          "model": {{
+            "thesis": "中心となる主張",  
+            "angles": ["掘り下げる観点A", "掘り下げる観点B"],
+            "evidence": "根拠として触れる事実やデータの種類",
+            "risk_check": "誇張や不確実な点を避けるための確認事項",
+            "arc": "導入から結論までのストーリーライン"
+          }}
+        }}
+
+        条件:
+        - 証拠や年代は確証があるものだけを書く。不明なら「未確認」と明示し、それ以上踏み込まない。
+        - Berkshireが1977年にNFT理論を提案した、など確証のない話は書かない。
+        - JSON以外の文字は出力しない。
+        """
+    )
+
+    answer = _post_llm(SECTION_MODEL, body, system=system)
+    fallback = {
+        "thesis": focus or section_title,
+        "angles": ["背景", "現在地", "影響"],
+        "evidence": "最新の公開情報と一次データを確認",
+        "risk_check": "年代や出典が曖昧なら断定しない",
+        "arc": "問いかけから問題提起、洞察、読者への提案までの流れ",
+    }
+
+    if _is_llm_error(answer):
+        return fallback
+
+    try:
+        data = json.loads(answer)
+        model = data.get("model") or {}
+        cleaned: dict[str, str] = {}
+        cleaned["thesis"] = _sanitize_output_text(str(model.get("thesis", "") or fallback["thesis"]))
+        cleaned["angles"] = ", ".join(
+            _sanitize_output_text(str(x)) for x in model.get("angles", []) if str(x).strip()
+        ) or ", ".join(fallback["angles"])
+        cleaned["evidence"] = _sanitize_output_text(str(model.get("evidence", "") or fallback["evidence"]))
+        cleaned["risk_check"] = _sanitize_output_text(str(model.get("risk_check", "") or fallback["risk_check"]))
+        cleaned["arc"] = _sanitize_output_text(str(model.get("arc", "") or fallback["arc"]))
+        return cleaned
+    except Exception:
+        return fallback
+
+
+def _format_modeling_summary(model: Mapping[str, str]) -> str:
+    return textwrap.dedent(
+        f"""
+        - Thesis: {model.get('thesis', '')}
+        - Angles: {model.get('angles', '')}
+        - Evidence plan: {model.get('evidence', '')}
+        - Risk/accuracy check: {model.get('risk_check', '')}
+        - Narrative arc: {model.get('arc', '')}
+        """
+    ).strip()
+
+
+def generate_english_section_body(
+    prompt: str,
+    category: str,
+    section_title: str,
+    focus: str,
+    modeling: Mapping[str, str],
+    index_snippet: str,
+    knowledge_snippet: str,
+) -> str:
+    """英語本文を先に生成し、途切れなく書き切る。"""
+
+    system = (
+        "You are a long-form blog writer who values factual accuracy and complete narratives."
+        " Finish every thought even if it takes extra length, and avoid unverifiable claims."
+    )
+
+    modeling_summary = _format_modeling_summary(modeling)
+    body = textwrap.dedent(
+        f"""
+        Reader request:
+        {prompt}
+
+        Category: {category}
+        Section title: {section_title}
+        Focus: {focus}
+
+        Modeling plan inferred earlier:
+        {modeling_summary}
+
+        Evidence snippets (objective data):
+        {index_snippet or "(no direct evidence available)"}
+
+        Background knowledge (Johanne's interpretation):
+        {knowledge_snippet or "(no additional notes)"}
+
+        Write the full section body in English.
+
+        Requirements:
+        - Honor the modeling plan and weave the angles into a single, cohesive narrative arc.
+        - Write at least {MIN_SECTION_CHARS} characters and keep sentences complete. Do not truncate or leave paragraphs hanging.
+        - If a fact is uncertain, mark it as uncertain and move on without speculation. Never invent claims such as "Berkshire proposed an NFT theory in 1977".
+        - Do not mention the words "データソース", "mybrain", "インデックス", or "クライアント".
+        - Keep a calm tone, thoughtful and reflective.
+        - Do not include meta-commentary like "(note: ...)".
+        - Output only the final English body text.
+        """
+    )
+
+    text = _post_llm(SECTION_MODEL, body, system=system)
+    if _is_llm_error(text):
+        fallback = build_section_body(
+            prompt,
+            category,
+            section_title,
+            focus,
+            index_snippet,
+            knowledge_snippet,
+        )
+        return fallback
+
+    return _sanitize_output_text(text)
+
+
+def translate_body(
+    english_body: str,
+    *,
+    target_lang: str,
+    section_title: str,
+    focus: str,
+    modeling: Mapping[str, str],
+) -> str:
+    """英語本文を他言語へ翻訳しつつ、内容の完全性を保つ。"""
+
+    system = (
+        "You are a precise translator. Preserve meaning and keep paragraphs complete."
+        " Avoid inventing facts and keep the calm tone."
+    )
+
+    body = textwrap.dedent(
+        f"""
+        Translate the following English section into {target_lang}.
+
+        Section title: {section_title}
+        Focus: {focus}
+        Modeling reminder: {_format_modeling_summary(modeling)}
+
+        English body:
+        {english_body}
+
+        Requirements:
+        - Keep the narrative whole; do not shorten or omit parts even if it becomes long.
+        - Avoid speculative or unverified claims; if something was marked uncertain, keep that qualifier.
+        - Do not add meta notes or mention data sources.
+        - Output only the translated body in {target_lang}.
+        """
+    )
+
+    translated = _post_llm(SECTION_MODEL, body, system=system)
+    if _is_llm_error(translated):
+        return english_body
+
+    return _sanitize_output_text(translated)
+
+
+def localize_section_titles(
+    section_title: str, modeling: Mapping[str, str]
+) -> dict[str, str]:
+    """セクション見出しを英語・イタリア語へ自然に翻訳する。"""
+
+    system = (
+        "You are a bilingual editor. Propose concise, natural titles in English and Italian."
+        " Keep the nuance of the source title and modeling plan."
+    )
+
+    body = textwrap.dedent(
+        f"""
+        元のセクションタイトル: {section_title}
+        モデリング概要: {_format_modeling_summary(modeling)}
+
+        出力フォーマット（JSONのみ）:
+        {{"titles": {{"en": "English title", "it": "Titolo in italiano"}}}}
+
+        条件:
+        - それぞれ15〜30文字程度で簡潔に。
+        - 不確かな固有名詞や年代は避け、事実に基づく表現だけを使う。
+        - JSON以外は出力しない。
+        """
+    )
+
+    answer = _post_llm(SECTION_MODEL, body, system=system)
+    titles = {"ja": section_title, "en": section_title, "it": section_title}
+    if _is_llm_error(answer):
+        return titles
+
+    try:
+        data = json.loads(answer)
+        raw = data.get("titles") or {}
+        titles["en"] = _sanitize_output_text(str(raw.get("en", section_title)) or section_title)
+        titles["it"] = _sanitize_output_text(str(raw.get("it", section_title)) or section_title)
+        return titles
+    except Exception:
+        return titles
+
+
 def _extract_chart_keywords(text: str, *, limit: int = 6) -> list[str]:
     tokens = re.findall(r"[\w\-]{3,}", text.lower())
     freq: dict[str, int] = {}
@@ -727,7 +959,8 @@ def build_section(
     cleaned_index_text: str,
     cleaned_knowledge_text: str,
 ) -> Section:
-    """各セクションの本文を1回の LLM で3言語分生成。"""
+    """各セクションを英語で書き切り、その後に翻訳する。"""
+
     keywords = []
     for token in re.split(r"[^\w]+", f"{prompt} {category} {section_title} {focus}"):
         token = token.strip()
@@ -737,99 +970,37 @@ def build_section(
     index_snippet = _extract_relevant_snippet(cleaned_index_text, keywords=keywords, max_chars=600)
     knowledge_snippet = _extract_relevant_snippet(cleaned_knowledge_text, keywords=keywords, max_chars=600)
 
-    system = (
-        "あなたは多言語の長文ブログライターです。"
-        "データソースは客観的な最新情報、mybrainはヨハネの知識・解釈として扱い、"
-        "両方を統合して自然な文章を日本語・英語・イタリア語で生成してください。"
+    modeling = infer_section_model(prompt, category, section_title, focus, index_snippet, knowledge_snippet)
+
+    english_body = generate_english_section_body(
+        prompt,
+        category,
+        section_title,
+        focus,
+        modeling,
+        index_snippet,
+        knowledge_snippet,
     )
 
-    body = textwrap.dedent(
-        f"""
-        読者からの依頼文:
-        {prompt}
-
-        カテゴリ: {category}
-        セクションタイトル: {section_title}
-        セクションの焦点: {focus}
-
-        データソースから関連しそうな情報（客観情報）:
-        {index_snippet or "（利用可能な情報なし）"}
-
-        mybrain から関連しそうな情報（ヨハネの知識・解釈）:
-        {knowledge_snippet or "（利用可能な情報なし）"}
-
-        出力フォーマット（JSON のみ）:
-        {{
-          "title_translations": {{"en": "English title", "it": "Italiano titolo"}},
-          "body": {{
-            "ja": "このセクションの本文（日本語・約{MIN_SECTION_CHARS}文字以上）",
-            "en": "Section body in English with similar depth",
-            "it": "Corpo della sezione in italiano con analoga profondità"
-          }}
-        }}
-
-        条件:
-        - 各言語で語調は落ち着き、同じ論旨を保つこと。
-        - 「データソース」「mybrain」「インデックス」「クライアント」といった語は本文に出さない。
-        - 全体でおよそ {MIN_SECTION_CHARS} 文字以上の充実した内容にする（各言語とも概ね同等の長さ）。
-        - 特定の取引所やサービス（Binanceなど）を褒めちぎる宣伝文句は禁止。
-        - Español など指示以外の言語は混ぜない。
-        - 同じ文をコピペしたような繰り返しは禁止。
-        - 「(注: …」「(注2: …」のようなメタ注記や、この文章が自動生成であることの説明は書かない。
-        - 哲学者気取りのヨハネが論理展開しながら、静かに読者に語りかけるトーンにする。
-        - JSON以外の文字は一切出力しない。
-        """
+    ja_body = translate_body(
+        english_body,
+        target_lang="Japanese",
+        section_title=section_title,
+        focus=focus,
+        modeling=modeling,
+    )
+    it_body = translate_body(
+        english_body,
+        target_lang="Italian",
+        section_title=section_title,
+        focus=focus,
+        modeling=modeling,
     )
 
-    answer = _post_llm(SECTION_MODEL, body, system=system)
-    titles = {"ja": section_title, "en": section_title, "it": section_title}
-    if _is_llm_error(answer):
-        body_text = build_section_body(
-            prompt,
-            category,
-            section_title,
-            focus,
-            cleaned_index_text,
-            cleaned_knowledge_text,
-        )
-        bodies = {"ja": body_text, "en": body_text, "it": body_text}
-        diagrams = build_multilingual_diagram(section_title, bodies)
-        return Section(titles=titles, bodies=bodies, diagrams=diagrams)
-
-    try:
-        data = json.loads(answer)
-        translated_titles = data.get("title_translations") or {}
-        if translated_titles:
-            titles.update({
-                "en": _sanitize_output_text(str(translated_titles.get("en", section_title))),
-                "it": _sanitize_output_text(str(translated_titles.get("it", section_title))),
-            })
-        body_map_raw = data.get("body") or {}
-        bodies = {
-            "ja": _sanitize_output_text(str(body_map_raw.get("ja", ""))),
-            "en": _sanitize_output_text(str(body_map_raw.get("en", ""))),
-            "it": _sanitize_output_text(str(body_map_raw.get("it", ""))),
-        }
-        if not bodies["ja"]:
-            raise ValueError("empty body in JSON")
-        for lang in ("en", "it"):
-            if not bodies[lang]:
-                bodies[lang] = bodies["ja"]
-
-        diagrams = build_multilingual_diagram(section_title, bodies)
-        return Section(titles=titles, bodies=bodies, diagrams=diagrams)
-    except Exception:
-        body_text = build_section_body(
-            prompt,
-            category,
-            section_title,
-            focus,
-            cleaned_index_text,
-            cleaned_knowledge_text,
-        )
-        bodies = {"ja": body_text, "en": body_text, "it": body_text}
-        diagrams = build_multilingual_diagram(section_title, bodies)
-        return Section(titles=titles, bodies=bodies, diagrams=diagrams)
+    titles = localize_section_titles(section_title, modeling)
+    bodies = {"en": english_body, "ja": ja_body, "it": it_body}
+    diagrams = build_multilingual_diagram(section_title, bodies)
+    return Section(titles=titles, bodies=bodies, diagrams=diagrams)
 
 
 def build_conclusion(
@@ -838,67 +1009,74 @@ def build_conclusion(
     sections: list[Section],
     cleaned_knowledge_text: str,
 ) -> dict[str, str]:
-    """7 セクション＋ mybrain を踏まえた総論を3言語で生成。"""
+    """7セクションを踏まえた総論を英語でまとめ、後から翻訳する。"""
+
     body_excerpt = "\n\n".join(
-        f"[{i+1}] {sec.titles.get('ja', '')}\n{sec.bodies.get('ja', '')[:200]}" for i, sec in enumerate(sections)
+        f"[{i+1}] {sec.titles.get('en', sec.titles.get('ja', ''))}\n{sec.bodies.get('en', '')[:240]}"  # noqa: E501
+        for i, sec in enumerate(sections)
     )
-    body_excerpt = body_excerpt[:1200]
+    body_excerpt = body_excerpt[:1500]
     knowledge_excerpt = _extract_relevant_snippet(cleaned_knowledge_text, keywords=[category], max_chars=500)
 
+    modeling = {
+        "thesis": f"Overall perspective on {category}",
+        "angles": "weave insights from all seven sections",
+        "evidence": "only verifiable timelines and public facts",
+        "risk_check": "avoid speculative claims; mark uncertainties",
+        "arc": "from common thread to implications and a calm closing",
+    }
+
     system = (
-        "あなたは多言語の長文ブログの締めとなる「総論」を書くアシスタントです。"
-        "7つのセクションで議論してきた内容を踏まえつつ、mybrainから見える背景を重ね、"
-        "日本語・英語・イタリア語で落ち着いたトーンのまとめを書いてください。"
+        "You are a multilingual essayist. Write the conclusion in English first, then it will be translated."
+        " Keep the discussion holistic rather than listing section by section, and finish every paragraph."
     )
 
     body = textwrap.dedent(
         f"""
-        読者からの依頼文:
+        Reader request:
         {prompt}
 
-        カテゴリ: {category}
+        Category: {category}
 
-        これまでの7セクションの内容（抜粋）:
+        Insights gathered across sections (English excerpts):
         {body_excerpt}
 
-        mybrain からの文脈・背景情報（抜粋）:
-        {knowledge_excerpt or "（追加の知識情報なし）"}
+        Background context from knowledge files:
+        {knowledge_excerpt or "(no extra knowledge available)"}
 
-        出力フォーマット（JSON のみ）:
-        {{
-          "summary": {{
-            "ja": "総論（日本語）",
-            "en": "Conclusion in English",
-            "it": "Conclusione in italiano"
-          }}
-        }}
-
-        要件:
-        - 7つのセクションで何を考えてきたのかを3〜5段落で整理する。
-        - カテゴリ「{category}」と読者のテーマを結び、読者の行動・視点にどんな変化を促したいかを書く。
-        - 全体でおよそ {SUMMARY_TARGET_CHARS} 文字前後の日本語と同等の分量で各言語を書く。
-        - 宣伝や煽り文句ではなく、静かな余韻と次の問いを残すトーン。
-        - 本文中に「インデックス」「クライアント」といった語は書かない。
-        - 「総論です」「まとめます」などのメタな一文や、「(注: …」などの注記は不要。本文だけを書く。
-        - JSON以外の文字は出力しない。
+        Requirements:
+        - Discuss the article as a whole; do not summarize section by section.
+        - Write around {SUMMARY_TARGET_CHARS} characters or more if needed to finish the thoughts—never leave ideas unfinished.
+        - Prefer facts that can be traced; if unsure, label them as uncertain and move on without speculation. Avoid fabrications such as "Berkshire proposed an NFT theory in 1977".
+        - Maintain a calm tone and avoid promotional language.
+        - Do not mention data sources or clients.
+        - Output only the final English conclusion text.
         """
     )
 
     fallback = _sanitize_output_text(body_excerpt or prompt)
-    text = _post_llm(SECTION_MODEL, body, system=system)
-    if _is_llm_error(text):
-        return {lang: (fallback[:SUMMARY_TARGET_CHARS].rstrip() + "…") for lang in ("ja", "en", "it")}
+    english = _post_llm(SECTION_MODEL, body, system=system)
+    if _is_llm_error(english):
+        english = fallback[:SUMMARY_TARGET_CHARS].rstrip() + "…"
+    else:
+        english = _sanitize_output_text(english)
 
-    try:
-        data = json.loads(text)
-        raw_summary = data.get("summary") or {}
-        return {
-            "ja": _sanitize_output_text(str(raw_summary.get("ja", ""))) or fallback,
-            "en": _sanitize_output_text(str(raw_summary.get("en", ""))) or fallback,
-            "it": _sanitize_output_text(str(raw_summary.get("it", ""))) or fallback,
-        }
-    except Exception:
-        return {lang: (fallback[:SUMMARY_TARGET_CHARS].rstrip() + "…") for lang in ("ja", "en", "it")}
+    ja = translate_body(
+        english,
+        target_lang="Japanese",
+        section_title="総論",
+        focus="記事全体のまとめ",
+        modeling=modeling,
+    )
+    it = translate_body(
+        english,
+        target_lang="Italian",
+        section_title="Conclusione",
+        focus="Sintesi complessiva",
+        modeling=modeling,
+    )
+
+    return {"en": english, "ja": ja, "it": it}
 
 
 def build_meta(
@@ -914,7 +1092,7 @@ def build_meta(
 
     system = (
         "あなたは多言語のブログ編集者です。"
-        "記事全体の内容に合ったタイトル・ディスクリプション・タグを日本語・英語・イタリア語で設計してください。"
+        "記事本文と総論から内容を推測し、タイトル・ディスクリプション・タグ6つを日本語・英語・イタリア語で設計してください。"
     )
 
     body = textwrap.dedent(
@@ -945,8 +1123,9 @@ def build_meta(
         - ディスクリプションは200文字を目安にし、210文字以内。
         - タグは合計6個（big2, normal2, small2）。
         - 特定サービスの宣伝ワードは禁止。中立的なキーワードにする。
+        - 確認できない年代・主張（例: Berkshireが1977年にNFT理論を提案）は書かない。事実ベースで構成する。
         - 「(注: …」などのメタ注記や、この文章が自動生成であることの説明は書かない。
-        - JSON以外は出力しない。
+        - JSON以外は出力しない。タイトルやタグはLLMの推論結果を必ず返す。
         """
     )
 
@@ -1173,7 +1352,7 @@ def generate_blogs(prompt: str, output_dir: Path = DEFAULT_OUTPUT_DIR) -> dict[s
         output_dir.mkdir(parents=True, exist_ok=True)
         files: dict[str, str] = {}
         html_map: dict[str, str] = {}
-        for lang in ("ja", "en", "it"):
+        for lang in ("en", "ja", "it"):
             meta = meta_info.get(lang, meta_info.get("ja", {}))
             html_text = compose_html(lang, meta, sections, conclusion)
             output_path = output_dir / f"{slug}_{lang}.html"
