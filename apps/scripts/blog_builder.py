@@ -288,6 +288,17 @@ def _safe_json_parse(text: str) -> dict[str, Any]:
     cleaned = re.sub(r"\s*```$", "", cleaned)
     cleaned = re.sub(r"^[^\{\[]*", "", cleaned)  # 先頭の説明文をざっくり削る
 
+    # ChatGPT 由来の会話区切りトークンが混ざるケースをカット
+    cleaned = re.split(r"<\|assistant\|", cleaned)[0]
+    cleaned = re.split(r"&lt;\|assistant\|", cleaned)[0]
+
+    # まずは素直に JSON として読んでみる
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+
+    # それでもダメなときは、最初の { ... } を抜き出して再トライ
     match = re.search(r"\{[\s\S]*\}", cleaned)
     if not match:
         return {}
@@ -301,119 +312,143 @@ def _safe_json_parse(text: str) -> dict[str, Any]:
 def _parse_loose_body_json(text: str) -> dict[str, Any]:
     """
     3段階ブログ生成の Body 用に、ゆるい JSON っぽい文字列から
-    body / diagram をできるだけ取り出すためのフォールバックパーサ。
+    body / diagram をできるだけ取り出すフォールバックパーサ。
 
-    想定している入力:
-    {
-      "body": "...(ここに長文。改行や <br> などがそのまま入っていることもある)...",
-      "diagram": [
-        { "title": "...", "content": "..." }
-      ]
-    }
-
-    - strict な json.loads に失敗したときだけ使う
-    - ダメなら {} を返す
+    - strict な json.loads に失敗したときだけ generate_three_stage_blog から呼ばれる想定
+    - 「```json ... ```」で囲まれていても OK
+    - 今回のような
+        "body": (Beginning of ...) Here is an example: ...
+      という「コメント＋本文」のパターンも拾う
     """
     if not text:
         return {}
 
-    # まずはコードフェンス系を削ぐ
+    # コードフェンスや会話区切りトークンをざっくり除去
     cleaned = text.strip()
     cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
     cleaned = re.sub(r"\s*```$", "", cleaned)
+    cleaned = re.split(r"<\|assistant\|", cleaned)[0]
+    cleaned = re.split(r"&lt;\|assistant\|", cleaned)[0]
 
-    # "body": " .... " ～ "diagram" の手前までを抜き出す
+    # まずは素直に JSON として読んでみる
+    obj: Any = None
+    try:
+        obj = json.loads(cleaned)
+    except Exception:
+        obj = None
+
+    def _normalize(obj: Mapping[str, Any]) -> dict[str, Any]:
+        body_val = obj.get("body")
+        diagram_val: Any = (
+            obj.get("diagram")
+            or obj.get("diagram_ascii")
+            or obj.get("diagram_text")
+        )
+
+        body_str = ""
+
+        # body がそのまま文字列
+        if isinstance(body_val, str):
+            body_str = body_val
+
+        # body が dict の場合は、主要キー → 文字列フィールドの順で連結
+        elif isinstance(body_val, Mapping):
+            for key in ("main_content", "content", "text", "article", "value"):
+                val = body_val.get(key)
+                if isinstance(val, str) and val.strip():
+                    body_str = val
+                    break
+            if not body_str:
+                parts: list[str] = []
+                for v in body_val.values():
+                    if isinstance(v, (str, int, float)):
+                        parts.append(str(v))
+                body_str = "\n\n".join(parts)
+
+        elif body_val is not None:
+            body_str = str(body_val)
+
+        # diagram を文字列に正規化
+        if isinstance(diagram_val, (list, dict)):
+            diagram_str = json.dumps(diagram_val, ensure_ascii=False, indent=2)
+        elif diagram_val is None:
+            diagram_str = ""
+        else:
+            diagram_str = str(diagram_val)
+
+        return {"body": body_str, "diagram": diagram_str}
+
+    # 正常な dict として読めたらそれを正規化して返す
+    if isinstance(obj, Mapping):
+        normalized = _normalize(obj)
+        if normalized.get("body") or normalized.get("diagram"):
+            return normalized
+
+    # ここからは「疑似 JSON 文字列」用のフォールバック
+
+    # "body": 〜 "diagram": の間をゆるく抜き出す
     m_body = re.search(
-        r'"body"\s*:\s*"(.*?)"\s*,\s*\n\s*"diagram"',
+        r'"body"\s*:\s*(.*?)(?=\n\s*"diagram"\s*:|\n\s*}\s*$)',
         cleaned,
         re.S,
     )
     if not m_body:
-        # "diagram" がない / フォーマットが違う場合もあるので、
-        # "body" だけでも取れれば使う
-        m_body_only = re.search(r'"body"\s*:\s*"(.*?)"', cleaned, re.S)
+        # body だけしか無いケース
+        m_body_only = re.search(r'"body"\s*:\s*(.*)$', cleaned, re.S)
         if not m_body_only:
             return {}
         raw_body = m_body_only.group(1)
     else:
         raw_body = m_body.group(1)
 
-    # JSON 由来のエスケープをある程度戻す
-    body_str = raw_body.replace('\\"', '"')
-    body_str = body_str.replace("\\n", "\n")
+    raw_body = raw_body.strip().rstrip(",")  # 末尾のカンマなどを削る
+
+    # 先頭に「(Beginning of ... )」のようなコメントがあれば落とす
+    if raw_body.startswith("("):
+        closing = raw_body.find(")")
+        if 0 < closing < 300:  # ざっくり 300 文字以内ならコメントとみなす
+            raw_body = raw_body[closing + 1 :].lstrip(" \t:-")
+
+    # 前後の引用符やバッククォートを剥がす
+    raw_body = raw_body.strip().strip('"\'')
+
+    # JSON 由来のエスケープを戻す
+    body_str = raw_body.replace('\\"', '"').replace("\\n", "\n")
 
     # diagram 部分を雑に抜いてみる（取れればラッキー）
-    m_diag = re.search(r'"diagram"\s*:\s*(\[[\s\S]*\])', cleaned)
-    diagram_val: Any = ""
+    m_diag = re.search(r'"diagram"\s*:\s*(.*?)(?:\n\s*}\s*$)', cleaned, re.S)
+    diagram_raw: Any = ""
     if m_diag:
-        diag_raw = m_diag.group(1).strip()
-        # まずはちゃんとした JSON として読んでみる
-        try:
-            diagram_val = json.loads(diag_raw)
-        except Exception:
-            # 無理なら文字列としてそのまま使う
-            diagram_val = diag_raw
+        diag = m_diag.group(1).strip().rstrip(",")
+        # 先頭のコメント括弧を削除
+        if diag.startswith("("):
+            closing = diag.find(")")
+            if 0 < closing < 300:
+                diag = diag[closing + 1 :].lstrip(" \t:-")
+        diag = diag.strip().strip('"\'')
 
-    return {"body": body_str, "diagram": diagram_val}
+        # 配列/オブジェクトっぽければ一度 JSON として読みに行く
+        if diag.startswith("[") or diag.startswith("{"):
+            try:
+                parsed = json.loads(diag)
+            except Exception:
+                diagram_raw = diag
+            else:
+                diagram_raw = parsed
+        else:
+            diagram_raw = diag
 
+    # diagram_raw が list/dict なら JSON 化、それ以外はそのまま
+    if isinstance(diagram_raw, (list, dict)):
+        diagram_str = json.dumps(diagram_raw, ensure_ascii=False, indent=2)
+    else:
+        diagram_str = str(diagram_raw) if diagram_raw else ""
 
-def _parse_loose_body_json(text: str) -> dict[str, Any]:
-    """
-    3段階ブログ生成の Body 用に、ゆるい JSON っぽい文字列から
-    body / diagram をできるだけ取り出すためのフォールバックパーサ。
-
-    想定している入力:
-    {
-      "body": "...(ここに長文。改行や <br> などがそのまま入っていることもある)...",
-      "diagram": [
-        { "title": "...", "content": "..." }
-      ]
-    }
-
-    - strict な json.loads に失敗したときだけ使う
-    - ダメなら {} を返す
-    """
-    if not text:
+    if not body_str and not diagram_str:
         return {}
 
-    # まずはコードフェンス系を削ぐ
-    cleaned = text.strip()
-    cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
-    cleaned = re.sub(r"\s*```$", "", cleaned)
+    return {"body": body_str, "diagram": diagram_str}
 
-    # "body": " .... " ～ "diagram" の手前までを抜き出す
-    m_body = re.search(
-        r'"body"\s*:\s*"(.*?)"\s*,\s*\n\s*"diagram"',
-        cleaned,
-        re.S,
-    )
-    if not m_body:
-        # "diagram" がない / フォーマットが違う場合もあるので、
-        # "body" だけでも取れれば使う
-        m_body_only = re.search(r'"body"\s*:\s*"(.*?)"', cleaned, re.S)
-        if not m_body_only:
-            return {}
-        raw_body = m_body_only.group(1)
-    else:
-        raw_body = m_body.group(1)
-
-    # JSON 由来のエスケープをある程度戻す
-    body_str = raw_body.replace('\\"', '"')
-    body_str = body_str.replace("\\n", "\n")
-
-    # diagram 部分を雑に抜いてみる（取れればラッキー）
-    m_diag = re.search(r'"diagram"\s*:\s*(\[[\s\S]*\])', cleaned)
-    diagram_val: Any = ""
-    if m_diag:
-        diag_raw = m_diag.group(1).strip()
-        # まずはちゃんとした JSON として読んでみる
-        try:
-            diagram_val = json.loads(diag_raw)
-        except Exception:
-            # 無理なら文字列としてそのまま使う
-            diagram_val = diag_raw
-
-    return {"body": body_str, "diagram": diagram_val}
 
 
 def _normalize_token(token: str) -> str:
@@ -1593,6 +1628,12 @@ def build_three_stage_prompts(prompt: str) -> dict[str, str]:
         Return JSON only with these keys:
         - body: a detailed explanation in English (aim for roughly 800-1200 words, paragraph-friendly)
         - diagram: an ASCII diagram or structured bullet diagram that clarifies the core idea; keep it text-only
+
+        VERY IMPORTANT:
+        - Output a single raw JSON object only.
+        - Do NOT wrap it in ```json fences.
+        - Do NOT add comments, explanations, or example text outside the JSON.
+        - Keys other than "body" and "diagram" are forbidden.
 
         Client instruction:
         {cleaned}
