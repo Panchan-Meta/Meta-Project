@@ -56,6 +56,42 @@ JSON リクエスト例:
 }
 ```
 
+## generate_blog_from_draft.py
+
+ドラフト (`indexes/mybrain/blog_draft.md`) とインデックス (`indexes/index.json`) を読み込み、
+最新記事のメタデータを添えた静的 HTML ブログを出力します。LLM を呼ばずに「ドラフトどおりの体裁」を
+一括生成したいときに使います。
+
+### 使い方
+
+```bash
+python apps/scripts/generate_blog_from_draft.py \
+  --draft indexes/mybrain/blog_draft.md \
+  --index indexes/index.json \
+  --output /mnt/hgfs/output/blog_auto.html
+```
+
+- `--keyword` を指定すると、そのキーワードを含む最新のインデックス記事を優先して参照します。
+- キーワード未指定時は、Punk Rock NFT など事前定義の 19 件からランダムで 1 つ選ばれます。
+- 出力 HTML にはドラフトのタイトル・ディスクリプション・タグ・各セクション本文・HTML 図解がそのまま反映され、
+  選ばれた最新記事（タイトル/URL/要約/公開日時）がメタ情報として表示されます。
+
+## blog_builder.py
+
+ブログ生成フローをまとめた小さなオーケストレータです。現在は `generate_blog_from_draft.py` を内部呼び出しし、
+ドラフトから静的 HTML を作ります。サブコマンドを増やす形で他の生成手段を追加できます。
+
+```bash
+python apps/scripts/blog_builder.py from_draft \
+  --draft indexes/mybrain/blog_draft.md \
+  --index indexes/index.json \
+  --output /mnt/hgfs/output/blog_auto.html \
+  --keyword "Punk Rock NFT"
+```
+
+呼び出し結果（生成先パスとキーワード）は標準出力に表示されます。必要に応じてスクリプトから直接
+`build_blog_from_draft` 関数を import して使うこともできます。
+
 ## ブログ生成フロー
 
 ブログの概論（約 500 文字）とセクション本文（各 1,500 文字）を生成する際のプロンプト設計とデータ参照手順は、クライアントには公開せず `client_instruction_responder.py` 内の `BLOG_WORKFLOW_GUIDE` に埋め込んでいます。`indexes/` 配下のテキストファイル（mybrain 配下を除く）と `indexes/mybrain/` 配下のテキストファイルを組み合わせて LLM に渡すワークフローを確認したいときは、コード内の定数を参照してください。
