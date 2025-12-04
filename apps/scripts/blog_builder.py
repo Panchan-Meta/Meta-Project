@@ -283,7 +283,11 @@ def _normalize_token(token: str) -> str:
 
 def is_latest_topic_request(prompt: str) -> bool:
     normalized = _normalize_token(prompt)
-    return "最新" in normalized and "トピック" in normalized
+    return (
+        ("最新" in normalized and "トピック" in normalized)
+        or "latesttopic" in normalized
+        or "picklatest" in normalized
+    )
 
 
 def pick_latest_topic_index(articles_dir: Path, keywords: list[str]) -> tuple[str | None, Path | None]:
@@ -323,39 +327,39 @@ def pick_latest_topic_index(articles_dir: Path, keywords: list[str]) -> tuple[st
 
 
 def build_latest_topic_prompt(keyword: str | None, source_path: Path, source_text: str) -> str:
-    keyword_line = keyword or "(キーワード未一致)"
+    keyword_line = keyword or "(no keyword match)"
     return textwrap.dedent(
         f"""
-        あなたは時事性の高い日本語ブログライターです。以下のインデックス原文を素材に、"最新トピック"としてクライアントへ返すアウトプットを作成してください。
+        You are a concise, news-savvy English blog writer. Using the source text below, prepare an output for the client when they ask for "the latest topic." All answers must be in English.
 
-        - 選ばれたキーワード: {keyword_line}
-        - 参照ソース: {source_path}
-        - 参考キーワード一覧: {', '.join(LATEST_TOPIC_KEYWORDS)}
+        - Selected keyword: {keyword_line}
+        - Source path: {source_path}
+        - Keyword catalog for reference: {', '.join(LATEST_TOPIC_KEYWORDS)}
 
-        まずソース全文を読み込み、約1000文字の日本語要約を作成してください。その要約を踏まえ、ペルソナに刺さる以下の要素をまとめます。
-        1. タイトル（50文字以内）
-        2. ディスクリプション（200文字程度）
-        3. タグ（ビッグ2語、普通2語、スモール2語を半角カンマ区切りで1行に）
-        4. 1000文字の要約
-        5. ペルソナに刺さる見出し7つ
+        First, read the entire source and write an English summary of about 1000 characters. Then, based on that summary, produce persona-resonating items:
+        1. Title (within 50 characters)
+        2. Description (about 200 characters)
+        3. Tags (one line: two BIG words, two NORMAL words, two SMALL words, separated by half-width commas)
+        4. The ~1000-character summary
+        5. Seven persona-resonating headlines
 
-        出力フォーマット（必ずこの順で日本語のみ）:
-        タイトル: <タイトル>
-        ディスクリプション: <ディスクリプション>
-        タグ: <ビッグ,ビッグ,普通,普通,スモール,スモール>
-        要約: <1000文字の要約本文>
-        見出し:
-        1. <見出し1>
-        2. <見出し2>
-        3. <見出し3>
-        4. <見出し4>
-        5. <見出し5>
-        6. <見出し6>
-        7. <見出し7>
+        Output format (keep this order and use English only):
+        Title: <title>
+        Description: <description>
+        Tags: <BIG,BIG,NORMAL,NORMAL,SMALL,SMALL>
+        Summary: <~1000-character summary>
+        Headlines:
+        1. <headline 1>
+        2. <headline 2>
+        3. <headline 3>
+        4. <headline 4>
+        5. <headline 5>
+        6. <headline 6>
+        7. <headline 7>
 
-        --- インデックス原文ここから ---
+        --- BEGIN SOURCE ---
         {source_text}
-        --- インデックス原文ここまで ---
+        --- END SOURCE ---
         """
     ).strip()
 
@@ -1389,7 +1393,7 @@ def handle_latest_topic_request(prompt: str) -> dict[str, Any] | None:
             return {
                 "ok": False,
                 "flag": "NO_LATEST_TOPIC_SOURCE",
-                "message": "最新トピック用のインデックスが見つかりません。",
+                "message": "No index file found for the latest topic request.",
                 "category": "",
                 "subcategory": "",
                 "files": {},
