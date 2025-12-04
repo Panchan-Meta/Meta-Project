@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 import threading
+import random
 
 import requests
 
@@ -53,6 +54,30 @@ MIN_SECTION_CHARS = 1500
 SUMMARY_TARGET_CHARS = 1500
 
 LLM_CALL_COUNT = 0
+
+
+LATEST_TOPIC_KEYWORDS = [
+    "Punk Rock NFT",
+    "Web3 Dystopia（ウェブスリー・ディストピア）",
+    "Crypto Resistance（クリプト・レジスタンス）",
+    "Spy × Punk Girls（スパイ×パンクガールズ）",
+    "Chain of Heresy（異端者たちのチェーン）",
+    "Faith vs. Market（信仰かマーケットか）",
+    "Digital Anarchy（デジタル・アナーキー）",
+    "Post-Dollar World（ポスト・ドル世界）",
+    "Shadow Intelligence（影のインテリジェンス）",
+    "Mental Health × NFT（メンタルヘルスNFT）",
+    "Punk Theology（パンク神学）",
+    "Risk & Redemption（リスクと贖い）",
+    "Cyber Confession（サイバー懺悔室）",
+    "Underground Worship（アンダーグラウンド礼拝）",
+    "Geopolitics & Girls（地政学と少女たち）",
+    "Broken Utopia（壊れたユートピア）",
+    "DeFi Church（ディーファイ教会）",
+    "World Bug Hunters（世界のバグハンター）",
+    "Anti-Propaganda Art（アンチプロパガンダ・アート）",
+    "Hold Your Anxiety（不安ごとHODLする）",
+]
 
 
 # ======================= ステータスレポート ===================
@@ -250,6 +275,93 @@ def _sanitize_output_text(text: str) -> str:
     text = text.replace("クライアント", "読者")
 
     return text.strip()
+
+
+def _normalize_token(token: str) -> str:
+    return re.sub(r"[\s_\-・、,。()（）\[\]]+", "", token).casefold()
+
+
+def is_latest_topic_request(prompt: str) -> bool:
+    normalized = _normalize_token(prompt)
+    return (
+        ("最新" in normalized and "トピック" in normalized)
+        or "latesttopic" in normalized
+        or "picklatest" in normalized
+    )
+
+
+def pick_latest_topic_index(articles_dir: Path, keywords: list[str]) -> tuple[str | None, Path | None]:
+    """キーワードに紐づくインデックスファイルをランダムに1つ選ぶ。"""
+
+    if not articles_dir.exists():
+        return None, None
+
+    keyword_pool = list(keywords)
+    random.shuffle(keyword_pool)
+
+    def iter_candidate_files() -> list[Path]:
+        return [
+            p
+            for p in articles_dir.rglob("*")
+            if p.is_file() and p.suffix.lower() in {".txt", ".md", ".html", ".htm"}
+        ]
+
+    haystacks: dict[str, list[Path]] = {kw: [] for kw in keyword_pool}
+    for path in iter_candidate_files():
+        normalized_path = _normalize_token(str(path.relative_to(articles_dir)))
+        for kw in keyword_pool:
+            if not kw:
+                continue
+            if _normalize_token(kw) in normalized_path:
+                haystacks.setdefault(kw, []).append(path)
+
+    for kw in keyword_pool:
+        if haystacks.get(kw):
+            return kw, random.choice(haystacks[kw])
+
+    # キーワード一致がない場合でも、インデックスファイルから1つ選んで返す
+    candidates = iter_candidate_files()
+    if candidates:
+        return None, random.choice(candidates)
+    return None, None
+
+
+def build_latest_topic_prompt(keyword: str | None, source_path: Path, source_text: str) -> str:
+    keyword_line = keyword or "(no keyword match)"
+    return textwrap.dedent(
+        f"""
+        You are a concise, news-savvy English blog writer. Using the source text below, prepare an output for the client when they ask for "the latest topic." All answers must be in English.
+
+        - Selected keyword: {keyword_line}
+        - Source path: {source_path}
+        - Keyword catalog for reference: {', '.join(LATEST_TOPIC_KEYWORDS)}
+
+        First, read the entire source and write an English summary of about 1000 characters. Then, based on that summary, produce persona-resonating items:
+        1. Title (within 50 characters)
+        2. Description (about 200 characters)
+        3. Tags (one line: two BIG words, two NORMAL words, two SMALL words, separated by half-width commas)
+        4. The ~1000-character summary
+        5. Seven persona-resonating headlines
+
+        Output format (keep this order and use English only):
+        Title: <title>
+        Description: <description>
+        Tags: <BIG,BIG,NORMAL,NORMAL,SMALL,SMALL>
+        Summary: <~1000-character summary>
+        Headlines:
+        1. <headline 1>
+        2. <headline 2>
+        3. <headline 3>
+        4. <headline 4>
+        5. <headline 5>
+        6. <headline 6>
+        7. <headline 7>
+
+        --- BEGIN SOURCE ---
+        {source_text}
+        --- END SOURCE ---
+        """
+    ).strip()
 
 
 def read_snippet(path: Path, *, max_chars: int | None = None) -> str:
@@ -1271,6 +1383,53 @@ def compose_html(
 # ======================= メインパイプライン ===================
 
 
+def handle_latest_topic_request(prompt: str) -> dict[str, Any] | None:
+    if not is_latest_topic_request(prompt):
+        return None
+
+    with status_scope("latest_topic"):
+        keyword, source_path = pick_latest_topic_index(ARTICLES_DIR, LATEST_TOPIC_KEYWORDS)
+        if not source_path:
+            return {
+                "ok": False,
+                "flag": "NO_LATEST_TOPIC_SOURCE",
+                "message": "No index file found for the latest topic request.",
+                "category": "",
+                "subcategory": "",
+                "files": {},
+                "html": {},
+                "llm_calls": LLM_CALL_COUNT,
+            }
+
+        source_text = read_snippet(source_path, max_chars=12000)
+        cleaned_source = _clean_text(source_text)
+        summary_prompt = build_latest_topic_prompt(keyword, source_path, cleaned_source)
+        llm_answer = _post_llm(SECTION_MODEL, summary_prompt)
+        if _is_llm_error(llm_answer):
+            return {
+                "ok": False,
+                "flag": "LLM_ERROR",
+                "message": llm_answer,
+                "category": keyword or "",
+                "subcategory": "",
+                "files": {},
+                "html": {},
+                "llm_calls": LLM_CALL_COUNT,
+            }
+
+        return {
+            "ok": True,
+            "flag": "FLAG:LATEST_TOPIC",
+            "message": _sanitize_output_text(llm_answer),
+            "category": keyword or "LATEST_TOPIC",
+            "subcategory": "",
+            "files": {},
+            "html": {},
+            "llm_calls": LLM_CALL_COUNT,
+            "source_file": str(source_path),
+        }
+
+
 def _slugify(text: str) -> str:
     slug = re.sub(r"[^A-Za-z0-9]+", "-", text).strip("-")
     return slug[:64] or "blog"
@@ -1279,6 +1438,10 @@ def _slugify(text: str) -> str:
 def generate_blogs(prompt: str, output_dir: Path = DEFAULT_OUTPUT_DIR) -> dict[str, Any]:
     """仕様に沿って日英伊のブログを生成し、HTMLを保存してメタ情報を返す。"""
     with status_scope("generate_blogs"):
+        latest_topic = handle_latest_topic_request(prompt)
+        if latest_topic is not None:
+            return latest_topic
+
         taxonomy = discover_article_taxonomy(ARTICLES_DIR)
         categories = list(taxonomy)
 
