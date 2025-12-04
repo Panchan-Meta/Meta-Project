@@ -227,6 +227,8 @@ def build_generation_prompt(headline: str, summary: str) -> str:
            - Use a concise, professional, and informative tone suitable for a client-facing deliverable.
            - Expand the Body into seven headings, writing roughly 1,500 characters for each section and including an HTML
              diagram (ASCII art or well-structured lists) inside every section.
+           - Create a new section for approximately every 2,000 characters of narrative and place an HTML illustration
+             directly after each paragraph to visualize the text.
            - Convert any encoded Greek references such as "(from Greek: \u03b2\u03c1\u03af\u03c4\u03bfy\u03bb\u03ae \u03bc\u03cc\u03c0\u03bf\u03c5\u03b3\u03b9l\u03ba\u03ac)" into their
              proper characters: (from Greek: βρίτουλή μόπουγιλικά).
            - Write the Conclusion as an approximately 1,500-character section.
