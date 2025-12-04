@@ -22,6 +22,7 @@ import argparse
 import json
 import os
 import random
+import re
 import textwrap
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -113,6 +114,41 @@ def _parse_json_payload(payload: Any, *, source: str) -> list[IndexEntry]:
     return []
 
 
+def _strip_markdown_fence(text: str) -> str:
+    match = re.match(r"```(?:json)?\s*(.*)```\s*$", text.strip(), flags=re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return text.strip()
+
+
+def _relaxed_json_loads(candidate: str) -> Any:
+    cleaned = _strip_markdown_fence(candidate)
+    cleaned = re.sub(r",\s*([}\]])", r"\1", cleaned)
+    return json.loads(cleaned)
+
+
+def _parse_relaxed_json_blocks(text: str, *, source: str) -> list[IndexEntry]:
+    entries: list[IndexEntry] = []
+    candidates = [text]
+    candidates.extend(match.group(1) for match in re.finditer(r"```json(.*?)```", text, flags=re.DOTALL))
+    candidates.extend(
+        match.group(1)
+        for match in re.finditer(r"```(?!json)(.*?)```", text, flags=re.DOTALL)
+        if match.group(1).strip().startswith("{")
+    )
+
+    for candidate in candidates:
+        try:
+            payload = _relaxed_json_loads(candidate)
+        except Exception:  # noqa: BLE001
+            continue
+        entries.extend(_parse_json_payload(payload, source=source))
+        if entries:
+            break
+
+    return entries
+
+
 def load_index_entries(index_file: Path) -> list[IndexEntry]:
     """Parse the index file into a list of IndexEntry objects."""
 
@@ -125,6 +161,11 @@ def load_index_entries(index_file: Path) -> list[IndexEntry]:
             payload = json.loads(text)
             entries.extend(_parse_json_payload(payload, source=index_file.name))
         except json.JSONDecodeError:
+            entries.extend(_parse_relaxed_json_blocks(text, source=index_file.name))
+        except Exception:  # noqa: BLE001
+            entries.extend(_parse_relaxed_json_blocks(text, source=index_file.name))
+
+        if not entries:
             for line in text.splitlines():
                 line = line.strip()
                 if not line:
