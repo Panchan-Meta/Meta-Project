@@ -7,7 +7,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-from blog_builder import DEFAULT_OUTPUT_DIR, STATUS_REPORTER, generate_blogs
+from blog_builder import DEFAULT_OUTPUT_DIR, STATUS_REPORTER, generate_three_stage_blog
 
 
 class BlogRequestHandler(BaseHTTPRequestHandler):
@@ -40,7 +40,7 @@ class BlogRequestHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": "prompt_missing"}, status=HTTPStatus.BAD_REQUEST)
             return
 
-        results = generate_blogs(prompt, output_dir=DEFAULT_OUTPUT_DIR)
+        results = generate_three_stage_blog(prompt, output_dir=DEFAULT_OUTPUT_DIR)
         html_map = results.get("html", {}) if isinstance(results, dict) else {}
         files_map = results.get("files", {}) if isinstance(results, dict) else {}
 
