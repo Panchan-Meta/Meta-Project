@@ -155,8 +155,9 @@ def _format_articles(articles: Iterable[Article]) -> str:
 def _build_overview(knowledge: str, articles: list[Article]) -> str:
     recent_titles = ", ".join(article.title for article in articles[:3]) or "no-index-yet"
     article_note = f"Recent index pull featured: {recent_titles}."
+    source_hint = "Overview distilled from mybrain/knowledge.md. "
     body = (
-        f"{knowledge}\n\nJohanne reads Rahab as a manifesto against hollow growth. "
+        f"{source_hint}{knowledge}\n\nJohanne reads Rahab as a manifesto against hollow growth. "
         f"He tracks crypto swings not for hype but to map geopolitics, "
         f"and he wants roadmaps that tie ideology to action. {article_note} "
         "Every riff, render, and roadmap must admit doubt while inviting calculated risk."
@@ -198,6 +199,10 @@ def _build_translations(title: str, description: str) -> str:
         "Johanne vede Rahab come un laboratorio punk dove il rischio è calcolato. "
         "Ogni sezione chiede trasparenza, non culto, e collega arte, criptovalute e geopolitica."
     )
+    spa = (
+        "Johanne lee Rahab como un manifiesto punk para riesgos conscientes. "
+        "Quiere arte, cripto y geopolítica unidas con advertencias claras y pasos accionables."
+    )
     ja = (
         "ヨハネはラハブを、盲信ではなく思考で燃料を補うパンクな実験場として読む。 "
         "芸術・クリプト・世界情勢を結び、安心材料とリスクの両方を示してほしい。"
@@ -205,6 +210,7 @@ def _build_translations(title: str, description: str) -> str:
     return (
         "<section><h2>Translations</h2>"
         f"<h3>Italiano</h3><p><strong>{title}</strong><br>{ita}</p>"
+        f"<h3>Español</h3><p><strong>{title}</strong><br>{spa}</p>"
         f"<h3>日本語</h3><p><strong>{title}</strong><br>{ja}</p>"
         "</section>"
     )
