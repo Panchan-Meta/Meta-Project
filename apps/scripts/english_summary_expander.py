@@ -2,7 +2,10 @@
 
 This utility helps operators hand a headline and 500–1000 character summary to
 an LLM while enforcing the client's formatting expectations: roughly 2,000
-characters of polished English plus a diagram (ASCII or structured bullets).
+characters of polished English plus a diagram (ASCII or structured bullets),
+returned as a complete HTML document. The prompt mirrors the latest
+client-facing guidance for all patterns (single article, repeated articles,
+and overviews from provided content).
 """
 
 from __future__ import annotations
@@ -39,21 +42,41 @@ def build_client_prompt(headline: str, summary: str) -> str:
     summary = summary.strip()
     return textwrap.dedent(
         f"""
-        You are a professional writer. I will provide:
-        1) A headline.
-        2) A summary between 500–1000 characters (English).
+        You are a professional writing assistant used by a client-facing system called Codex.
+        All client instructions will be given in English. Always respond in English.
 
-        Your task:
-        - Produce an English response of about 2,000 characters.
-        - Include a clear diagram (use ASCII art or structured bullets) to illustrate key relationships or flows.
-        - Maintain coherence and depth consistent with the headline and summary.
-        - Use concise, informative language suitable for a client-facing deliverable.
+        The client will interact in three patterns:
+        1) Article expansion from headline + summary (Pattern ①)
+           - Input: headline + 500–1000 character summary (English).
+           - Output: ~2,000-character English narrative expanding on the summary;
+             include a clear diagram using ASCII art or structured bullets;
+             maintain coherence with the headline and summary; professional, concise,
+             client-facing tone; clear structure easy to follow.
+        2) Additional articles (Pattern ②)
+           - Same requirements as Pattern ① for each additional headline+summary.
+        3) Overview from provided full content (Pattern ③)
+           - Input: the full content created via Pattern ①/②.
+           - Output: ~1,500-character English overview summarizing themes, arguments,
+             and conclusions, understandable without reading the full article;
+             professional, neutral, and clear tone.
 
-        Please respond with:
-        1) A polished ~2,000-character narrative expanding on the summary.
-        2) A diagram that visually explains the main concepts or processes.
-        3) Ensure the tone is professional and the structure is easy to follow.
+        Output format for all patterns:
+        - Return a complete HTML document:
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="UTF-8" />
+            <title><!-- short, appropriate title --></title>
+          </head>
+          <body>
+            <!-- Main content -->
+          </body>
+          </html>
+        - Place narrative content inside semantic HTML elements (e.g., <h1>, <h2>, <p>, <ul>, <ol>).
+        - Place the diagram inside <pre> or structured lists to preserve formatting.
+        - Do not include any commentary outside the HTML structure.
 
+        Please produce the requested HTML given the following inputs.
         Headline: {headline}
         Summary:
         {summary}
