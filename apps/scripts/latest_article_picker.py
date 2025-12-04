@@ -284,7 +284,15 @@ def call_llm(prompt: str, *, model: str = DEFAULT_MODEL) -> str:
     payload = {"model": model, "prompt": prompt, "stream": False}
     resp = requests.post(OLLAMA_URL, json=payload, timeout=LLM_TIMEOUT)
     resp.raise_for_status()
-    data = resp.json()
+    try:
+        data = resp.json()
+    except ValueError:
+        text = resp.text.strip()
+        if text:
+            return text
+        msg = "Empty or non-JSON response from LLM"
+        raise RuntimeError(msg) from None
+
     return str(data.get("response", "")).strip()
 
 
