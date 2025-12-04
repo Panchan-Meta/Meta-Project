@@ -1,6 +1,5 @@
-indexes/
 apps/logs/
-apps/logs/
-indexes/
+indexes/*
+!indexes/index.json
 __pycache__/
 *.pyc
