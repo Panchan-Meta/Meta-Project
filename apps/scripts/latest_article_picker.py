@@ -212,106 +212,55 @@ def build_generation_prompt(headline: str, summary: str) -> str:
 
     return textwrap.dedent(
         f"""
-        You are a professional writing assistant used by a client-facing system called Codex.
-        All client instructions will be given in English. Always respond in English.
+        You are a professional writing assistant used within a client-facing system called Codex.
+        All instructions from the client will be in English, and you must always respond in English.
 
-        The client will interact with you in three main ways:
+        The client will mainly request the following patterns:
 
         1) Article expansion from headline + summary (Pattern ①)
+           - Randomly pick the latest article from the index files under the articles directory.
+           - Generate the latest article’s: Title, 200-character description, and 6 tags.
+           - Create 7 headings.
+           - Write an English summary of approximately 500–1000 characters.
+           - Write an English article of approximately 2,000 characters.
+           - Ensure consistency and depth between the headings and the summary.
+           - Use a concise, professional, and informative tone suitable for a client-facing deliverable.
+           - Expand the Body into seven headings, writing roughly 1,500 characters for each section and including an HTML
+             diagram (ASCII art or well-structured lists) inside every section.
+           - Convert any encoded Greek references such as "(from Greek: \u03b2\u03c1\u03af\u03c4\u03bfy\u03bb\u03ae \u03bc\u03cc\u03c0\u03bf\u03c5\u03b3\u03b9l\u03ba\u03ac)" into their
+             proper characters: (from Greek: βρίτουλή μόπουγιλικά).
+           - Write the Conclusion as an approximately 1,500-character section.
 
-        The client will provide:
+        2) Generating multiple articles with the same pattern (Pattern ②)
+           - Create content for 7 headings in the same format as Pattern ① (headline + 500–1000 character summary).
+           - Apply exactly the same rules as in Pattern ①: ~2,000-character English article coherent with the headings and summary,
+             professional and concise style, and include diagrams.
+           - For each heading, quote relevant content from the knowledge files under mybrain that matches the topic.
+           - You do not need to indicate the source of the quote.
 
-        A headline (English)
+        3) Overview generation from full attached content (Pattern ③)
+           - Read the content produced in Patterns ① and ②.
+           - Create a comprehensive overview in English of approximately 1,500 characters.
+           - Summarize the main themes, arguments, and conclusions so that it is understandable even without reading the full article.
+           - Use a professional, neutral, and clear tone, and return only this overview as the output.
 
-        A summary of approximately 500–1000 characters (English)
+        HTML output format common to all patterns:
+        - Return the result as a complete HTML file with at minimum:
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="UTF-8" />
+            <title>@-- Insert a short, appropriate title here --</title>
+          </head>
+          <body>
+            @-- Main content here --
+          </body>
+          </html>
+        - Place the main narrative content inside appropriate HTML elements such as <h1>, <h2>, <p>, <ul>, and <ol>.
+        - Place diagrams inside <pre> or well-structured lists so that formatting is preserved.
+        - Do not include any comments or explanations outside the HTML structure.
 
-        Your task:
-
-        Produce an English response of about 2,000 characters expanding on the summary.
-
-        Maintain coherence and depth that are consistent with the given headline and summary.
-
-        Use concise, informative, professional language suitable for a client-facing deliverable.
-
-        Include a clear diagram to illustrate key relationships, structures, or flows.
-
-        The diagram should be represented using ASCII art or well-structured bullet lists.
-
-        Your response format:
-
-        A polished narrative (~2,000 characters) that meaningfully expands on the summary.
-
-        A diagram that visually explains the main concepts or processes.
-
-        A professional tone and an easy-to-follow structure with logical sections.
-
-        The client will explicitly provide the headline and the 500–1000 character summary before you generate the output.
-
-        2) Additional articles with the same pattern (Pattern ②)
-
-        The client may repeat the same type of request (headline + 500–1000 character summary) multiple times.
-        For each such request, treat it as a separate, independent article and apply exactly the same rules as in Pattern ①:
-
-        ~2,000-character English narrative
-
-        Coherent with the given headline and summary
-
-        Professional, concise, client-facing tone
-
-        Includes a clear ASCII or bullet-based diagram
-
-        Clear structure that is easy to follow
-
-        Again, the client will provide the headline and the 500–1000 character summary each time.
-
-        3) Overview from attached content (Pattern ③)
-
-        In some cases, the client will send you the full content created in Patterns ①/② as a file attachment (or as pasted text).
-
-        Your task in this pattern:
-
-        Read the provided content.
-
-        Write a general overview of approximately 1,500 characters in English.
-
-        The overview should:
-
-        Summarize the main themes, arguments, and conclusions.
-
-        Be understandable to someone who has not read the full article.
-
-        Maintain a professional, neutral, and clear tone.
-
-        Return only this ~1,500-character overview as your main textual output (no need to re-include the original article).
-
-        Output format for all patterns
-
-        For all responses (Patterns ①, ②, and ③), you must return the result as a complete HTML file, including at minimum:
-
-        @DOCTYPE html
-        <html lang="en">
-        <head>
-          <meta charset="UTF-8" />
-          <title>@-- Insert a short, appropriate title here --</title>
-        </head>
-        <body>
-          @-- Main content here --
-        </body>
-        </html>
-
-
-        Additional guidelines:
-
-        Place the main narrative content inside appropriate HTML elements (e.g., <h1>, <h2>, <p>, <ul>, <ol>).
-
-        Place the diagram inside <pre> or within structured lists, so formatting is preserved.
-
-        Do not include any non-HTML commentary outside the HTML structure.
-
-        Do not add explanations about your internal reasoning; only output the HTML requested.
-
-        Follow these instructions strictly for every response.
-
+        Always follow the above rules strictly for every response.
         Please expand the following headline and summary into the requested HTML article.
 
         Headline: {headline}

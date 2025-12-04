@@ -2,3 +2,5 @@ indexes/
 apps/logs/
 apps/logs/
 indexes/
+__pycache__/
+*.pyc
