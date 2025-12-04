@@ -138,6 +138,18 @@ def load_index_entries(index_file: Path) -> list[IndexEntry]:
             if entry.is_valid():
                 entries.append(entry)
 
+    # Plain-text fallback: treat paragraphs as entries (first line = headline, rest = summary)
+    if not entries and text:
+        for block in (segment.strip() for segment in text.split("\n\n")):
+            if not block:
+                continue
+            lines = block.splitlines()
+            headline = lines[0][:120]
+            summary = "\n".join(lines[1:]).strip() or headline
+            entry = IndexEntry(headline=headline, summary=summary, source=index_file.name)
+            if entry.is_valid():
+                entries.append(entry)
+
     return entries
 
 
