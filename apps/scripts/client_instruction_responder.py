@@ -66,6 +66,15 @@ def _load_persona_text() -> str:
         return "ペルソナ情報は利用できませんでした。"
 
 
+def _load_index_text() -> str:
+    """Return the raw index file content to attach as knowledge."""
+
+    try:
+        return INDEX_PATH.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return ""
+
+
 def _load_index_entries() -> list[dict[str, object]]:
     """Load index entries from the attached directory if present."""
 
@@ -105,7 +114,11 @@ def _select_latest_entry(keyword: str) -> dict[str, object] | None:
 
 
 def build_blog_generation_prompt(
-    original_prompt: str, persona_text: str, keyword: str, latest_entry: dict[str, object] | None
+    original_prompt: str,
+    persona_text: str,
+    keyword: str,
+    latest_entry: dict[str, object] | None,
+    index_text: str,
 ) -> str:
     """Compose the LLM prompt for blog requests using persona and latest info."""
 
@@ -120,6 +133,8 @@ def build_blog_generation_prompt(
             ]
         )
 
+    index_block = index_text or "インデックスファイルが添付されていません。"
+
     return (
         "ブログの概要要素を作成してください。\n"
         f"依頼内容: {original_prompt}\n"
@@ -128,11 +143,14 @@ def build_blog_generation_prompt(
         f"{persona_text}\n"
         "\n[最新情報]\n"
         f"{latest_info_block}\n"
+        "\n[添付インデックスファイル]\n"
+        f"{index_block}\n"
         "\n出力要件:\n"
         "- タイトル（50文字以内）\n"
         "- ディスクリプション（約200文字）\n"
         "- タグを6つ（箇条書き）\n"
         "- セクション名を7つ（箇条書き）\n"
+        "- 添付インデックスファイルの内容を参考にし、本文で要約できるように重要トピックを整理してください。\n"
         "すべて日本語で、ペルソナに刺さる語り口にしてください。"
     )
 
@@ -261,8 +279,9 @@ def respond_to_instruction(
         keyword = random.choice(BLOG_KEYWORDS)
         persona_text = _load_persona_text()
         latest_entry = _select_latest_entry(keyword)
+        index_text = _load_index_text()
         final_prompt = build_blog_generation_prompt(
-            prompt_text, persona_text, keyword, latest_entry
+            prompt_text, persona_text, keyword, latest_entry, index_text
         )
 
     selected_provider = provider or DEFAULT_PROVIDER
