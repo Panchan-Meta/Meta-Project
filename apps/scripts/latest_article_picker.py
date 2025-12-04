@@ -9,6 +9,7 @@ diagram) and optionally calls a configured LLM to generate the output.
 Features
 --------
 - Detect client intent from a free-form message.
+- Recognize both English and Japanese phrasing of the "latest article" request.
 - Locate the newest index file under the articles directory.
 - Parse index content in JSON/JSONL or plain-text formats to extract headline
   and summary pairs.
@@ -57,12 +58,20 @@ def is_latest_article_request(message: str) -> bool:
     """Return True if the message asks to pick and create the latest article.
 
     The detection is intentionally permissive to accommodate minor wording
-    variations (e.g., "latest article", "pick one of the newest posts").
+    variations (e.g., "latest article", "pick one of the newest posts") and
+    also recognizes the Japanese client phrasing we commonly receive:
+    "最新記事を１つピックアップして作成してください".
     """
 
     lowered = message.lower()
     keywords = ["latest article", "newest article", "pick up the latest", "one latest article"]
-    return any(key in lowered for key in keywords)
+    jp_keywords = [
+        "最新記事を1つピックアップ",
+        "最新記事を１つピックアップ",
+        "最新記事を一つピックアップ",
+        "最新記事をピックアップして作成",
+    ]
+    return any(key in lowered for key in keywords) or any(key in message for key in jp_keywords)
 
 
 def find_latest_index_file(index_dir: Path = BASE_DIR) -> Path:
