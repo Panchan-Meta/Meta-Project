@@ -14,6 +14,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Mapping
 
+from content_plan_generator import (
+    DEFAULT_BASE_URL as PLAN_BASE_URL,
+    DEFAULT_INDEX_FILE as PLAN_INDEX_FILE,
+    DEFAULT_KNOWLEDGE_FILE as PLAN_KNOWLEDGE_FILE,
+    DEFAULT_MODEL as PLAN_MODEL,
+    generate_plan,
+)
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OUTPUT_DIR = Path("/mnt/hgfs/output")
 DEFAULT_INDEX_FILE = PROJECT_ROOT / "indexes" / "index.json"
@@ -214,6 +222,30 @@ def _build_translations(title: str, description: str) -> str:
         f"<h3>日本語</h3><p><strong>{title}</strong><br>{ja}</p>"
         "</section>"
     )
+
+
+def generate_content_plan(*, dry_run: bool = False) -> dict[str, object] | None:
+    """Generate a structured content plan using the shared generator script.
+
+    The wrapper adds status messages for API clients and keeps a stable entry
+    point for the HTTP server.
+    """
+
+    STATUS_REPORTER.add("Starting content plan generation")
+    try:
+        result = generate_plan(
+            index_file=PLAN_INDEX_FILE,
+            knowledge_file=PLAN_KNOWLEDGE_FILE,
+            model=PLAN_MODEL,
+            base_url=PLAN_BASE_URL,
+            dry_run=dry_run,
+        )
+    except Exception as exc:  # noqa: BLE001 - surface unexpected errors to clients
+        STATUS_REPORTER.add(f"Content plan generation failed: {exc}")
+        return None
+
+    STATUS_REPORTER.add("Content plan generation completed")
+    return result
 
 
 def generate_three_stage_blog(prompt: str, output_dir: Path | None = None) -> dict[str, object]:

@@ -148,6 +148,41 @@ def build_prompt(entry: IndexEntry | None, knowledge: str, all_entries: list[Ind
 """.strip()
 
 
+def generate_plan(
+    *,
+    index_file: Path = DEFAULT_INDEX_FILE,
+    knowledge_file: Path = DEFAULT_KNOWLEDGE_FILE,
+    model: str = DEFAULT_MODEL,
+    base_url: str = DEFAULT_BASE_URL,
+    dry_run: bool = False,
+) -> dict[str, object]:
+    """Produce a content plan by sampling the index and invoking an LLM.
+
+    This helper is import-friendly for other modules (e.g., blog_server,
+    blog_builder) so they can reuse the same prompt structure without
+    shelling out to the script.
+    """
+
+    index_entries = load_index(index_file)
+    knowledge = load_knowledge(knowledge_file)
+    picked_entry = pick_random_entry(index_entries)
+    prompt = build_prompt(picked_entry, knowledge, index_entries)
+
+    if dry_run:
+        return {
+            "prompt": prompt,
+            "content": None,
+            "entry": picked_entry.__dict__ if picked_entry else None,
+        }
+
+    content = call_ollama(prompt, model=model, base_url=base_url)
+    return {
+        "prompt": prompt,
+        "content": content,
+        "entry": picked_entry.__dict__ if picked_entry else None,
+    }
+
+
 def call_ollama(prompt: str, model: str = DEFAULT_MODEL, base_url: str = DEFAULT_BASE_URL) -> str:
     """Send the prompt to an Ollama-compatible /api/generate endpoint."""
 
