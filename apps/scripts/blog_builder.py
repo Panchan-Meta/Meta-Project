@@ -279,11 +279,16 @@ def _sanitize_output_text(text: str) -> str:
 
 def _safe_json_parse(text: str) -> dict[str, Any]:
     """Extract the first JSON object from ``text`` and return it as a dict."""
-
     if not text:
         return {}
 
-    match = re.search(r"\{[\s\S]*\}", text)
+    # よくあるラッパー (```json ... ``` など) を剥がす
+    cleaned = text.strip()
+    cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+    cleaned = re.sub(r"\s*```$", "", cleaned)
+    cleaned = re.sub(r"^[^\{\[]*", "", cleaned)  # 先頭の説明文をざっくり削る
+
+    match = re.search(r"\{[\s\S]*\}", cleaned)
     if not match:
         return {}
 
@@ -291,6 +296,124 @@ def _safe_json_parse(text: str) -> dict[str, Any]:
         return json.loads(match.group())
     except json.JSONDecodeError:
         return {}
+
+
+def _parse_loose_body_json(text: str) -> dict[str, Any]:
+    """
+    3段階ブログ生成の Body 用に、ゆるい JSON っぽい文字列から
+    body / diagram をできるだけ取り出すためのフォールバックパーサ。
+
+    想定している入力:
+    {
+      "body": "...(ここに長文。改行や <br> などがそのまま入っていることもある)...",
+      "diagram": [
+        { "title": "...", "content": "..." }
+      ]
+    }
+
+    - strict な json.loads に失敗したときだけ使う
+    - ダメなら {} を返す
+    """
+    if not text:
+        return {}
+
+    # まずはコードフェンス系を削ぐ
+    cleaned = text.strip()
+    cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+    cleaned = re.sub(r"\s*```$", "", cleaned)
+
+    # "body": " .... " ～ "diagram" の手前までを抜き出す
+    m_body = re.search(
+        r'"body"\s*:\s*"(.*?)"\s*,\s*\n\s*"diagram"',
+        cleaned,
+        re.S,
+    )
+    if not m_body:
+        # "diagram" がない / フォーマットが違う場合もあるので、
+        # "body" だけでも取れれば使う
+        m_body_only = re.search(r'"body"\s*:\s*"(.*?)"', cleaned, re.S)
+        if not m_body_only:
+            return {}
+        raw_body = m_body_only.group(1)
+    else:
+        raw_body = m_body.group(1)
+
+    # JSON 由来のエスケープをある程度戻す
+    body_str = raw_body.replace('\\"', '"')
+    body_str = body_str.replace("\\n", "\n")
+
+    # diagram 部分を雑に抜いてみる（取れればラッキー）
+    m_diag = re.search(r'"diagram"\s*:\s*(\[[\s\S]*\])', cleaned)
+    diagram_val: Any = ""
+    if m_diag:
+        diag_raw = m_diag.group(1).strip()
+        # まずはちゃんとした JSON として読んでみる
+        try:
+            diagram_val = json.loads(diag_raw)
+        except Exception:
+            # 無理なら文字列としてそのまま使う
+            diagram_val = diag_raw
+
+    return {"body": body_str, "diagram": diagram_val}
+
+
+def _parse_loose_body_json(text: str) -> dict[str, Any]:
+    """
+    3段階ブログ生成の Body 用に、ゆるい JSON っぽい文字列から
+    body / diagram をできるだけ取り出すためのフォールバックパーサ。
+
+    想定している入力:
+    {
+      "body": "...(ここに長文。改行や <br> などがそのまま入っていることもある)...",
+      "diagram": [
+        { "title": "...", "content": "..." }
+      ]
+    }
+
+    - strict な json.loads に失敗したときだけ使う
+    - ダメなら {} を返す
+    """
+    if not text:
+        return {}
+
+    # まずはコードフェンス系を削ぐ
+    cleaned = text.strip()
+    cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+    cleaned = re.sub(r"\s*```$", "", cleaned)
+
+    # "body": " .... " ～ "diagram" の手前までを抜き出す
+    m_body = re.search(
+        r'"body"\s*:\s*"(.*?)"\s*,\s*\n\s*"diagram"',
+        cleaned,
+        re.S,
+    )
+    if not m_body:
+        # "diagram" がない / フォーマットが違う場合もあるので、
+        # "body" だけでも取れれば使う
+        m_body_only = re.search(r'"body"\s*:\s*"(.*?)"', cleaned, re.S)
+        if not m_body_only:
+            return {}
+        raw_body = m_body_only.group(1)
+    else:
+        raw_body = m_body.group(1)
+
+    # JSON 由来のエスケープをある程度戻す
+    body_str = raw_body.replace('\\"', '"')
+    body_str = body_str.replace("\\n", "\n")
+
+    # diagram 部分を雑に抜いてみる（取れればラッキー）
+    m_diag = re.search(r'"diagram"\s*:\s*(\[[\s\S]*\])', cleaned)
+    diagram_val: Any = ""
+    if m_diag:
+        diag_raw = m_diag.group(1).strip()
+        # まずはちゃんとした JSON として読んでみる
+        try:
+            diagram_val = json.loads(diag_raw)
+        except Exception:
+            # 無理なら文字列としてそのまま使う
+            diagram_val = diag_raw
+
+    return {"body": body_str, "diagram": diagram_val}
 
 
 def _normalize_token(token: str) -> str:
@@ -1576,7 +1699,8 @@ def generate_three_stage_blog(prompt: str, output_dir: Path = DEFAULT_OUTPUT_DIR
         meta_raw = _post_llm(SECTION_MODEL, prompts["meta"])
         body_raw = _post_llm(SECTION_MODEL, prompts["body"])
         conclusion_raw = _post_llm(SECTION_MODEL, prompts["conclusion"])
-
+    
+        # --- meta -------------------------------------------------
         meta = _safe_json_parse(meta_raw)
         if not meta:
             meta = {
@@ -1585,14 +1709,25 @@ def generate_three_stage_blog(prompt: str, output_dir: Path = DEFAULT_OUTPUT_DIR
                 "tags": [],
                 "summary": meta_raw,
             }
-
+    
+        # --- body (ここを強化) -------------------------------------
         body = _safe_json_parse(body_raw)
+    
         if not body:
+            # strict JSON がダメだったら、ゆるい JSON パーサを試す
+            loose = _parse_loose_body_json(body_raw)
+            if loose:
+                body = loose
+    
+        if not body:
+            # それでもダメなら、従来どおり丸ごと本文にする
             body = {"body": body_raw, "diagram": ""}
-
+    
+        # --- conclusion ------------------------------------------
         conclusion_data = _safe_json_parse(conclusion_raw)
         conclusion = conclusion_data.get("conclusion") if isinstance(conclusion_data, dict) else None
         conclusion = conclusion or conclusion_raw
+
 
         html_text = compose_three_stage_html(prompt, meta, body, conclusion)
 
