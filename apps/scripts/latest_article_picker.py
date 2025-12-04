@@ -120,23 +120,24 @@ def load_index_entries(index_file: Path) -> list[IndexEntry]:
     entries: list[IndexEntry] = []
 
     # JSON or JSON Lines
-    try:
-        payload = json.loads(text)
-        entries.extend(_parse_json_payload(payload, source=index_file.name))
-    except json.JSONDecodeError:
-        for line in text.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                payload = json.loads(line)
-                entries.extend(_parse_json_payload(payload, source=index_file.name))
-                continue
-            except json.JSONDecodeError:
-                pass
-            entry = IndexEntry(headline=line[:120], summary=line, source=index_file.name)
-            if entry.is_valid():
-                entries.append(entry)
+    if index_file.suffix.lower() in {".json", ".jsonl", ".ndjson"}:
+        try:
+            payload = json.loads(text)
+            entries.extend(_parse_json_payload(payload, source=index_file.name))
+        except json.JSONDecodeError:
+            for line in text.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    payload = json.loads(line)
+                    entries.extend(_parse_json_payload(payload, source=index_file.name))
+                    continue
+                except json.JSONDecodeError:
+                    pass
+                entry = IndexEntry(headline=line[:120], summary=line, source=index_file.name)
+                if entry.is_valid():
+                    entries.append(entry)
 
     # Plain-text fallback: treat paragraphs as entries (first line = headline, rest = summary)
     if not entries and text:
@@ -149,6 +150,12 @@ def load_index_entries(index_file: Path) -> list[IndexEntry]:
             entry = IndexEntry(headline=headline, summary=summary, source=index_file.name)
             if entry.is_valid():
                 entries.append(entry)
+
+    # Final fallback: use the entire text as a single entry to avoid surfacing parse errors
+    if not entries and text:
+        entry = IndexEntry(headline=text.splitlines()[0][:120], summary=text, source=index_file.name)
+        if entry.is_valid():
+            entries.append(entry)
 
     return entries
 
