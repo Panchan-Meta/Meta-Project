@@ -9,7 +9,12 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-from blog_builder import DEFAULT_OUTPUT_DIR, STATUS_REPORTER, generate_three_stage_blog
+from blog_builder import (
+    DEFAULT_OUTPUT_DIR,
+    STATUS_REPORTER,
+    generate_content_plan,
+    generate_three_stage_blog,
+)
 
 UPLOAD_DIR = Path("/var/www/Meta-Project/data/client")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -81,16 +86,20 @@ class BlogRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     # --------------------------------------------------------------------- #
-    #  POST /api/generate_blog
+    #  POST /api/generate_blog or /api/generate_content_plan
     # --------------------------------------------------------------------- #
     def do_POST(self) -> None:  # noqa: N802 (HTTP verb casing)
-        if self.path != "/api/generate_blog":
+        is_blog = self.path == "/api/generate_blog"
+        is_plan = self.path == "/api/generate_content_plan"
+
+        if not (is_blog or is_plan):
             self._send_json({"ok": False, "error": "not_found"}, status=HTTPStatus.NOT_FOUND)
             return
 
         content_type = self.headers.get("Content-Type", "")
         length = int(self.headers.get("Content-Length", "0"))
         uploaded_files: list[Path] = []
+        json_body: dict[str, object] | None = None
 
         # 1) 入力の取り出し（プレーン JSON or multipart/form-data）
         if content_type.startswith("multipart/form-data"):
@@ -104,11 +113,35 @@ class BlogRequestHandler(BaseHTTPRequestHandler):
             )
             prompt_text, uploaded_files = self._build_prompt_from_multipart(form)
         else:
-            data = self._read_body()
-            prompt_text = str(data.get("prompt", "")).strip() if isinstance(data, dict) else ""
+            json_body = self._read_body()
+            prompt_text = str(json_body.get("prompt", "")).strip() if isinstance(json_body, dict) else ""
 
-        if not prompt_text:
+        if not prompt_text and is_blog:
             self._send_json({"ok": False, "error": "prompt_missing"}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        if is_plan:
+            dry_run = False
+            if json_body is not None:
+                dry_run = bool(json_body.get("dry_run", False))
+
+            results = generate_content_plan(dry_run=dry_run)
+            if not isinstance(results, dict):
+                self._send_json(
+                    {"ok": False, "error": "generation_failed"},
+                    status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
+                return
+
+            payload: dict[str, object] = {
+                "ok": True,
+                "content": results.get("content"),
+                "prompt": results.get("prompt"),
+                "entry": results.get("entry"),
+                "status_updates": STATUS_REPORTER.pop_messages(include_current=True),
+                "uploaded_files": [path.name for path in uploaded_files],
+            }
+            self._send_json(payload, status=HTTPStatus.OK)
             return
 
         # 2) ブログ生成本体
