@@ -120,7 +120,7 @@ def build_blog_generation_prompt(
     latest_entry: dict[str, object] | None,
     index_text: str,
 ) -> str:
-    """Compose the LLM prompt for blog requests using persona and latest info."""
+    """Compose the LLM prompt for rich HTML blog requests using persona and latest info."""
 
     latest_info_block = "最新情報が見つかりませんでした。"
     if latest_entry:
@@ -136,7 +136,7 @@ def build_blog_generation_prompt(
     index_block = index_text or "インデックスファイルが添付されていません。"
 
     return (
-        "ブログの概要要素を作成してください。\n"
+        "以下の条件でリッチHTMLのブログ記事を作成してください。\n"
         f"依頼内容: {original_prompt}\n"
         f"選択キーワード: {keyword}\n"
         "\n[ペルソナ情報]\n"
@@ -145,13 +145,21 @@ def build_blog_generation_prompt(
         f"{latest_info_block}\n"
         "\n[添付インデックスファイル]\n"
         f"{index_block}\n"
-        "\n出力要件:\n"
-        "- タイトル（50文字以内）\n"
-        "- ディスクリプション（約200文字）\n"
-        "- タグを6つ（箇条書き）\n"
-        "- セクション名を7つ（箇条書き）\n"
-        "- 添付インデックスファイルの内容を参考にし、本文で要約できるように重要トピックを整理してください。\n"
-        "すべて日本語で、ペルソナに刺さる語り口にしてください。"
+        "\n[図解の使い方]\n"
+        "- 3〜5 個の図解を HTML で埋め込み、<figure class=\"diagram\"> で囲んでください。\n"
+        "- 導入で 1 つ（記事マップ／概念マップ）、中盤で 1〜2 つ（フロー図・シーケンス図・アーキテクチャ図・比較表・折れ線/棒/円グラフなど）、終盤で 1 つ（リスクマトリクス／要点サマリー／今後の展望ツリー）を配置してください。\n"
+        "- 図の候補例: 記事マップ、概念マップ、マインドマップ、フロー図、シーケンス図、全体アーキテクチャ図、インフラ構成図、比較表/レーダーチャート、折れ線グラフ/棒グラフ/円グラフ、ステップ図、リスクマトリクス、Myth vs Fact 図、ペルソナカード、要点サマリー図、今後の展望ツリー。\n"
+        "- 図解は純粋な HTML/CSS で簡潔に表現し、内容を短い箇条書きやテーブルで示してください (SVG/Canvas 不要)。\n"
+        "\n[出力HTML構造]\n"
+        "- <article> 内に収め、プレーン HTML で返してください。\n"
+        "- <header> にタイトル、約 200 文字のディスクリプション、タグ 6 つ (ul > li) を配置。\n"
+        "- <section class=\"summary\"> に 300〜400 文字のリード文と、重要ポイント 3〜5 件の箇条書きを置いてください。\n"
+        "- セクション名を 7 つ使い、各 <section class=\"body\"> に h2 見出し＋本文 350〜500 文字＋ 3 点以内の箇条書きを含め、本文直後に対応する <figure> 図解を挿入。\n"
+        "- <footer> にリスクと対処法の要約、今後の展望や ToDo を簡潔にまとめるブロックを置いてください。\n"
+        "\n[執筆要件]\n"
+        "- すべて日本語で、ペルソナに刺さる語り口にしてください。\n"
+        "- 添付インデックスファイルと最新情報を引用し、本文で要約できるように重要トピックを整理してください。\n"
+        "- 図解のキャプションに図の種類を明記し、本文の要点と整合させてください。\n"
     )
 
 
