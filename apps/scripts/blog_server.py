@@ -9,11 +9,11 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-from blog_builder import (
-    DEFAULT_OUTPUT_DIR,
-    STATUS_REPORTER,
-    generate_content_plan,
-    generate_three_stage_blog,
+from client_instruction_responder import (
+    DEFAULT_API_BASE,
+    DEFAULT_MODEL,
+    DEFAULT_PROVIDER,
+    respond_to_instruction,
 )
 
 UPLOAD_DIR = Path("/var/www/Meta-Project/data/client")
@@ -116,71 +116,49 @@ class BlogRequestHandler(BaseHTTPRequestHandler):
             json_body = self._read_body()
             prompt_text = str(json_body.get("prompt", "")).strip() if isinstance(json_body, dict) else ""
 
-        if not prompt_text and is_blog:
+        if not prompt_text:
             self._send_json({"ok": False, "error": "prompt_missing"}, status=HTTPStatus.BAD_REQUEST)
             return
 
-        if is_plan:
-            dry_run = False
-            if json_body is not None:
-                dry_run = bool(json_body.get("dry_run", False))
+        model = DEFAULT_MODEL
+        provider = DEFAULT_PROVIDER
+        api_base = DEFAULT_API_BASE
+        filename = None
+        if isinstance(json_body, dict):
+            model = str(json_body.get("model", model))
+            provider = str(json_body.get("provider", provider))
+            api_base = str(json_body.get("api_base", api_base))
+            filename = str(json_body.get("filename")) if json_body.get("filename") else None
 
-            results = generate_content_plan(dry_run=dry_run)
-            if not isinstance(results, dict):
-                self._send_json(
-                    {"ok": False, "error": "generation_failed"},
-                    status=HTTPStatus.INTERNAL_SERVER_ERROR,
-                )
-                return
-
-            payload: dict[str, object] = {
-                "ok": True,
-                "content": results.get("content"),
-                "prompt": results.get("prompt"),
-                "entry": results.get("entry"),
-                "status_updates": STATUS_REPORTER.pop_messages(include_current=True),
-                "uploaded_files": [path.name for path in uploaded_files],
-            }
-            self._send_json(payload, status=HTTPStatus.OK)
-            return
-
-        # 2) ブログ生成本体
-        results = generate_three_stage_blog(prompt_text, output_dir=DEFAULT_OUTPUT_DIR)
-        if not isinstance(results, dict):
-            self._send_json({"ok": False, "error": "generation_failed"}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
-            return
-
-        html_map = results.get("html", {}) if isinstance(results, dict) else {}
-        files_map = results.get("files", {}) if isinstance(results, dict) else {}
-
-        ja_html = html_map.get("ja", "") if isinstance(html_map, dict) else ""
-        ja_file = files_map.get("ja", "") if isinstance(files_map, dict) else ""
-        flag = results.get("flag", "FLAG:FILES_SENT")
-
-        # ファイルがあればディスク上の内容を優先
-        response_html = ja_html
-        if ja_file and Path(ja_file).is_file():
-            response_html = Path(ja_file).read_text(encoding="utf-8")
-
-
-        if not response_html:
+        try:
+            result = respond_to_instruction(
+                prompt_text,
+                model=model,
+                provider=provider,
+                api_base=api_base,
+                filename=filename,
+            )
+        except ValueError as exc:
             self._send_json(
-                {"ok": False, "error": "generation_failed"},
+                {"ok": False, "error": f"invalid_request: {exc}"},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
+        except Exception as exc:  # pragma: no cover - runtime specific
+            self._send_json(
+                {"ok": False, "error": f"execution_failed: {exc}"},
                 status=HTTPStatus.INTERNAL_SERVER_ERROR,
             )
             return
 
-        filename = Path(ja_file).name if ja_file else "blog.html"
-
-        # クライアントがそのまま json.loads / resp.json() できる形で返す
-        payload: dict[str, object] = {
-            "ok": True,
-            "flag": flag,
-            "filename": filename,
-            "html": response_html,  # ここに HTML 本文を全部入れる
-            "files": {code: Path(path).name for code, path in files_map.items()},
-            "category": results.get("category") if isinstance(results, dict) else None,
-            "status_updates": STATUS_REPORTER.pop_messages(include_current=True),
+        payload = {
+            "ok": bool(result.get("ok", False)),
+            "html": result.get("html"),
+            "filename": result.get("filename"),
+            "path": result.get("path"),
+            "model": result.get("model"),
+            "provider": result.get("provider"),
+            "error": result.get("error"),
             "uploaded_files": [path.name for path in uploaded_files],
         }
         self._send_json(payload, status=HTTPStatus.OK)
@@ -194,13 +172,15 @@ class BlogRequestHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": "not_found"}, status=HTTPStatus.NOT_FOUND)
             return
 
-        updates = STATUS_REPORTER.pop_messages(include_current=True)
-        self._send_json({"ok": True, "updates": updates})
+        self._send_json({"ok": True, "updates": []})
 
 
 def run(host: str = "0.0.0.0", port: int = 8000) -> None:
     server = HTTPServer((host, port), BlogRequestHandler)
-    print(f"Serving blog generator on http://{host}:{port}/api/generate_blog")
+    print(
+        "Serving client instruction responder on "
+        f"http://{host}:{port}/api/generate_blog"
+    )
     try:
         server.serve_forever()
     finally:
