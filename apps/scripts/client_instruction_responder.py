@@ -40,6 +40,13 @@ BLOG_KEYWORDS = [
     "Anti-Propaganda Art（アンチプロパガンダ・アート）",
     "Hold Your Anxiety（不安ごとHODLする）",
 ]
+DIAGRAM_TRIGGER_KEYWORDS = [
+    "図解",
+    "ダイアグラム",
+    "diagram",
+    "可視化",
+]
+DIAGRAM_MODEL = "codegemma:2b"
 BLOG_WORKFLOW_GUIDE = """
 ブログ生成フロー仕様
 
@@ -72,6 +79,25 @@ BLOG_WORKFLOW_GUIDE = """
 【運用メモ】
 - 概論と各セクションを別々に生成し、最終的に一つの HTML に結合します。`client_instruction_responder.py` には `--filename` でファイル名を指定できます。
 - LLM への入力が長くなる場合は、索引用テキストの該当ファイルだけを貼り付けるか、要約部分だけを引用してください。
+""".strip()
+
+DIAGRAM_PROMPT_GUIDE = """
+以下の依頼は図解生成です。JavaScript と CSS を使ったリッチな HTML として、プレーンテキストではなくブラウザでそのまま閲覧できるコンテンツを出力してください。
+
+[出力条件]
+- <article> を起点に、<header>/<main>/<section>/<footer> を使って構造化する。
+- 各図解は <figure> と <figcaption> を用い、箇条書きやテーブルを交えて情報量を確保する。
+- <style> で背景色・ボーダー・グリッド・カード風レイアウトを整え、<script> でタブ/トグル/ソートなど軽量なインタラクションを付与する（外部ライブラリなし、素の JavaScript）。
+- 図解のキャプションに種類（例: シーケンス図、マインドマップ、比較表）を明記し、日本語で簡潔に説明する。
+- コードブロックやダミーデータを挿入する場合も、HTML 内で完結する形で記述する。
+
+[図解の候補と配置]
+- 導入: 記事全体像マップ／ロードマップや概念マップ（メイントピックと関連トピックの関係）。
+- 中盤: 仕組み・フロー・アーキテクチャ・比較・グラフ（フロー図、シーケンス図、全体アーキテクチャ図、インフラ構成図、比較表、レーダーチャート、折れ線/棒/円グラフ、ステップ図）。
+- 終盤: リスク図解・要点サマリー・今後の展望（リスクマトリクス、Myth vs Fact 図、要点サマリー図、今後の展望ツリー、ペルソナ/ユースケースのカード）。
+- 1 記事あたり 3〜5 個の図解を上記リストから選び、本文の流れに合わせて <section> 内に配置する。
+
+[依頼内容]
 """.strip()
 
 SYSTEM_PROMPT = """
@@ -258,6 +284,19 @@ def _select_latest_entry(keyword: str) -> dict[str, object] | None:
     return candidates[0] if candidates else None
 
 
+def _is_diagram_request(prompt: str) -> bool:
+    """Return True when the prompt clearly asks for diagram/visual output."""
+
+    lowered = prompt.casefold()
+    return any(keyword.casefold() in lowered for keyword in DIAGRAM_TRIGGER_KEYWORDS)
+
+
+def build_diagram_generation_prompt(original_prompt: str) -> str:
+    """Wrap the original instruction with HTML/JS rich output guidance."""
+
+    return "\n".join([DIAGRAM_PROMPT_GUIDE, original_prompt.strip()])
+
+
 def build_blog_generation_prompt(
     original_prompt: str,
     persona_text: str,
@@ -292,8 +331,10 @@ def build_blog_generation_prompt(
         f"{index_block}\n"
         "\n[図解の使い方]\n"
         "- 3〜5 個の図解を HTML で埋め込み、<figure class=\"diagram\"> で囲んでください。\n"
-        "- 導入で 1 つ（記事マップ／概念マップ）、中盤で 1〜2 つ（フロー図・シーケンス図・アーキテクチャ図・比較表・折れ線/棒/円グラフなど）、終盤で 1 つ（リスクマトリクス／要点サマリー／今後の展望ツリー）を配置してください。\n"
-        "- 図の候補例: 記事マップ、概念マップ、マインドマップ、フロー図、シーケンス図、全体アーキテクチャ図、インフラ構成図、比較表/レーダーチャート、折れ線グラフ/棒グラフ/円グラフ、ステップ図、リスクマトリクス、Myth vs Fact 図、ペルソナカード、要点サマリー図、今後の展望ツリー。\n"
+        "- 図解は次のリストから選び、本文の流れに合わせて配置してください。\n"
+        "  - 導入: 記事全体像マップ／ロードマップや概念マップ。\n"
+        "  - 中盤: 仕組み・フロー・アーキテクチャ・比較・グラフ（フロー図、シーケンス図、全体アーキテクチャ図、インフラ構成図、比較表、レーダーチャート、折れ線/棒/円グラフ、ステップ図）。\n"
+        "  - 終盤: リスク図解・要点サマリー・今後の展望（リスクマトリクス、Myth vs Fact 図、要点サマリー図、今後の展望ツリー、ペルソナ/ユースケースのカード）。\n"
         "- 図解は純粋な HTML/CSS で簡潔に表現し、内容を短い箇条書きやテーブルで示してください (SVG/Canvas 不要)。\n"
         "\n[出力HTML構造]\n"
         "- <article> 内に収め、プレーン HTML で返してください。\n"
@@ -427,6 +468,10 @@ def respond_to_instruction(
     if not prompt_text:
         raise ValueError("Prompt text is required.")
 
+    selected_provider = provider or DEFAULT_PROVIDER
+    selected_model = model or DEFAULT_MODEL
+    selected_api_base = api_base or DEFAULT_API_BASE
+
     final_prompt = prompt_text
     if BLOG_TRIGGER_PHRASE in prompt_text:
         keyword = random.choice(BLOG_KEYWORDS)
@@ -436,10 +481,10 @@ def respond_to_instruction(
         final_prompt = build_blog_generation_prompt(
             prompt_text, persona_text, keyword, latest_entry, index_text
         )
-
-    selected_provider = provider or DEFAULT_PROVIDER
-    selected_model = model or DEFAULT_MODEL
-    selected_api_base = api_base or DEFAULT_API_BASE
+    elif _is_diagram_request(prompt_text):
+        final_prompt = build_diagram_generation_prompt(prompt_text)
+        selected_model = DIAGRAM_MODEL
+        selected_provider = "ollama"
 
     if selected_provider == "ollama":
         completion, error = generate_ollama_completion(
