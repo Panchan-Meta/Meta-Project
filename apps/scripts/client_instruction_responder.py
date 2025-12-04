@@ -1,0 +1,251 @@
+from __future__ import annotations
+
+import argparse
+import html
+import json
+import sys
+from datetime import datetime
+from importlib.util import find_spec
+from pathlib import Path
+from urllib.error import URLError
+from urllib.request import Request, urlopen
+
+OUTPUT_DIR = Path("/mnt/hgfs/output")
+DEFAULT_MODEL = "phi3:mini"
+DEFAULT_PROVIDER = "ollama"
+DEFAULT_API_BASE = "http://127.0.0.1:11434"
+SYSTEM_PROMPT = """
+あなたは日本語で簡潔に回答するアシスタントです。依頼内容を整理し、必要に応じて箇条書きでわかりやすくまとめてください。
+""".strip()
+
+OPENAI_AVAILABLE = find_spec("openai") is not None
+if OPENAI_AVAILABLE:
+    from openai import OpenAI
+else:  # pragma: no cover - optional dependency hint
+    OpenAI = None  # type: ignore[misc]
+
+
+def _htmlize_text(text: str) -> str:
+    """Escape text for HTML and preserve line breaks."""
+    escaped = html.escape(text)
+    return escaped.replace("\n", "<br/>")
+
+
+def generate_openai_completion(prompt: str, model: str) -> tuple[str | None, str | None]:
+    """Send the prompt to OpenAI if available and return (content, error)."""
+    if not OPENAI_AVAILABLE:
+        return None, "openai パッケージが見つかりません。 'pip install openai' を実行してください。"
+
+    client = OpenAI()
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.4,
+        )
+    except Exception as exc:  # pragma: no cover - network/API specific
+        return None, str(exc)
+
+    message = response.choices[0].message.content if response.choices else None
+    return message.strip() if message else "", None
+
+
+def generate_ollama_completion(
+    prompt: str, model: str, api_base: str
+) -> tuple[str | None, str | None]:
+    """Send the prompt to Ollama's /api/chat endpoint and return (content, error)."""
+
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
+        "stream": False,
+    }
+
+    try:
+        request = Request(
+            url=f"{api_base.rstrip('/')}/api/chat",
+            method="POST",
+            headers={"Content-Type": "application/json"},
+            data=json.dumps(payload).encode("utf-8"),
+        )
+        with urlopen(request) as response:
+            data = json.loads(response.read())
+    except URLError as exc:  # pragma: no cover - depends on runtime environment
+        return None, f"Ollama への接続に失敗しました: {exc.reason}"
+    except Exception as exc:  # pragma: no cover - network/API specific
+        return None, str(exc)
+
+    message = None
+    if isinstance(data, dict):
+        message = data.get("message", {}).get("content") or data.get("response")
+
+    if message is None:
+        return None, "Ollama から有効な応答が得られませんでした。"
+
+    return str(message).strip(), None
+
+
+def build_html(prompt: str, completion: str, model: str, error: str | None = None) -> str:
+    """Compose an HTML document that shows the prompt and LLM response."""
+    timestamp = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    error_block = (
+        f'<p class="error">LLM エラー: {html.escape(error)}</p>' if error else ""
+    )
+    return f"""<!doctype html>
+<html lang=\"ja\">
+<head>
+  <meta charset=\"UTF-8\" />
+  <title>LLM 応答</title>
+  <style>
+    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 1.5rem; color: #1f2933; }}
+    h1 {{ font-size: 1.5rem; margin-bottom: 0.25rem; }}
+    .meta {{ color: #52606d; font-size: 0.95rem; margin-bottom: 1rem; }}
+    section {{ margin-bottom: 1.25rem; }}
+    pre {{ background: #f5f7fa; padding: 0.75rem; border-radius: 8px; white-space: pre-wrap; word-break: break-word; }}
+    .response {{ background: #f0f4ff; padding: 0.75rem; border-radius: 8px; line-height: 1.6; }}
+    .error {{ color: #b42318; font-weight: 600; }}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>LLM 応答</h1>
+    <p class=\"meta\">モデル: {html.escape(model)} / 出力時刻 (UTC): {timestamp}</p>
+  </header>
+  <main>
+    <section>
+      <h2>依頼内容</h2>
+      <pre>{html.escape(prompt)}</pre>
+    </section>
+    <section>
+      <h2>生成結果</h2>
+      <div class=\"response\">{_htmlize_text(completion)}</div>
+      {error_block}
+    </section>
+  </main>
+</body>
+</html>
+"""
+
+
+def respond_to_instruction(
+    prompt: str,
+    *,
+    model: str = DEFAULT_MODEL,
+    provider: str = DEFAULT_PROVIDER,
+    api_base: str = DEFAULT_API_BASE,
+    filename: str | None = None,
+) -> dict[str, object]:
+    """Generate a response HTML document and save it to disk.
+
+    Returns a dict containing success flag, HTML content, output path, and error message.
+    """
+
+    prompt_text = prompt.strip()
+    if not prompt_text:
+        raise ValueError("Prompt text is required.")
+
+    selected_provider = provider or DEFAULT_PROVIDER
+    selected_model = model or DEFAULT_MODEL
+    selected_api_base = api_base or DEFAULT_API_BASE
+
+    if selected_provider == "ollama":
+        completion, error = generate_ollama_completion(
+            prompt_text, selected_model, selected_api_base
+        )
+    else:
+        completion, error = generate_openai_completion(prompt_text, selected_model)
+
+    if completion is None:
+        completion = "LLM 応答を生成できませんでした。詳細は error を確認してください。"
+
+    html_document = build_html(prompt_text, completion, selected_model, error)
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    resolved_filename = filename or f"client_response_{datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}.html"
+    output_path = OUTPUT_DIR / resolved_filename
+    output_path.write_text(html_document, encoding="utf-8")
+
+    return {
+        "ok": error is None,
+        "html": html_document,
+        "path": str(output_path),
+        "filename": resolved_filename,
+        "model": selected_model,
+        "provider": selected_provider,
+        "error": error,
+    }
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "クライアントの指示を LLM に投げ、結果を /mnt/hgfs/output 以下に HTML で保存します。"
+        )
+    )
+    parser.add_argument(
+        "prompt",
+        nargs="?",
+        help="クライアントの指示文。省略時は標準入力を参照します。",
+    )
+    parser.add_argument(
+        "--model",
+        default=DEFAULT_MODEL,
+        help=f"使用するモデル名 (デフォルト: {DEFAULT_MODEL})",
+    )
+    parser.add_argument(
+        "--provider",
+        choices=["ollama", "openai"],
+        default=DEFAULT_PROVIDER,
+        help=(
+            "使用する推論エンジン。Ollama で phi3:mini (タイトル/タグ/セクション名)"
+            " と llama3:8b (本文/図解/総論) を使う運用を想定しています。"
+        ),
+    )
+    parser.add_argument(
+        "--api-base",
+        default=DEFAULT_API_BASE,
+        help="Ollama を利用する場合のベース URL (デフォルト: http://127.0.0.1:11434)",
+    )
+    parser.add_argument(
+        "--filename",
+        help="出力 HTML ファイル名。省略時はタイムスタンプ付きで保存します。",
+    )
+    return parser.parse_args(argv)
+
+
+def read_prompt(args: argparse.Namespace) -> str:
+    if args.prompt:
+        return args.prompt.strip()
+
+    if not sys.stdin.isatty():
+        text = sys.stdin.read().strip()
+        if text:
+            return text
+
+    raise SystemExit("プロンプトが指定されていません。引数または標準入力で渡してください。")
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
+    prompt_text = read_prompt(args)
+    result = respond_to_instruction(
+        prompt_text,
+        model=args.model,
+        provider=args.provider,
+        api_base=args.api_base,
+        filename=args.filename,
+    )
+
+    print(f"HTML を {result['path']} に出力しました。")
+    if result.get("error"):
+        print(f"LLM 呼び出しで警告が発生しました: {result['error']}", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()
