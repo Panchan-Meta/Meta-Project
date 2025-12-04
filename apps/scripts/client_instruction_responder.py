@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import random
 import sys
 from datetime import datetime
 from importlib.util import find_spec
@@ -11,9 +12,34 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 OUTPUT_DIR = Path("/mnt/hgfs/output")
+INDEX_PATH = Path("indexes/index.json")
+PERSONA_PATH = Path("mybrain/knowledge.md")
 DEFAULT_MODEL = "phi3:mini"
 DEFAULT_PROVIDER = "ollama"
 DEFAULT_API_BASE = "http://127.0.0.1:11434"
+BLOG_TRIGGER_PHRASE = "ブログ書いて"
+BLOG_KEYWORDS = [
+    "Punk Rock NFT",
+    "Web3 Dystopia（ウェブスリー・ディストピア）",
+    "Crypto Resistance（クリプト・レジスタンス）",
+    "Spy × Punk Girls（スパイ×パンクガールズ）",
+    "Chain of Heresy（異端者たちのチェーン）",
+    "Faith vs. Market（信仰かマーケットか）",
+    "Digital Anarchy（デジタル・アナーキー）",
+    "Post-Dollar World（ポスト・ドル世界）",
+    "Shadow Intelligence（影のインテリジェンス）",
+    "Mental Health × NFT（メンタルヘルスNFT）",
+    "Punk Theology（パンク神学）",
+    "Risk & Redemption（リスクと贖い）",
+    "Cyber Confession（サイバー懺悔室）",
+    "Underground Worship（アンダーグラウンド礼拝）",
+    "Geopolitics & Girls（地政学と少女たち）",
+    "Broken Utopia（壊れたユートピア）",
+    "DeFi Church（ディーファイ教会）",
+    "World Bug Hunters（世界のバグハンター）",
+    "Anti-Propaganda Art（アンチプロパガンダ・アート）",
+    "Hold Your Anxiety（不安ごとHODLする）",
+]
 SYSTEM_PROMPT = """
 あなたは日本語で簡潔に回答するアシスタントです。依頼内容を整理し、必要に応じて箇条書きでわかりやすくまとめてください。
 """.strip()
@@ -29,6 +55,86 @@ def _htmlize_text(text: str) -> str:
     """Escape text for HTML and preserve line breaks."""
     escaped = html.escape(text)
     return escaped.replace("\n", "<br/>")
+
+
+def _load_persona_text() -> str:
+    """Read persona information from the local knowledge base if available."""
+
+    try:
+        return PERSONA_PATH.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return "ペルソナ情報は利用できませんでした。"
+
+
+def _load_index_entries() -> list[dict[str, object]]:
+    """Load index entries from the attached directory if present."""
+
+    try:
+        return json.loads(INDEX_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return []
+    except json.JSONDecodeError:
+        return []
+
+
+def _parse_published(value: object) -> datetime:
+    try:
+        return datetime.fromisoformat(str(value))
+    except Exception:
+        return datetime.min
+
+
+def _select_latest_entry(keyword: str) -> dict[str, object] | None:
+    """Pick the latest index entry, prioritizing those matching the keyword."""
+
+    entries = _load_index_entries()
+    if not entries:
+        return None
+
+    keyword_lower = keyword.casefold()
+
+    def matches(entry: dict[str, object]) -> bool:
+        haystack = f"{entry.get('title', '')} {entry.get('summary', '')}".casefold()
+        return keyword_lower in haystack
+
+    filtered = [entry for entry in entries if matches(entry)]
+    candidates = filtered or entries
+
+    candidates.sort(key=lambda entry: _parse_published(entry.get("published")), reverse=True)
+    return candidates[0] if candidates else None
+
+
+def build_blog_generation_prompt(
+    original_prompt: str, persona_text: str, keyword: str, latest_entry: dict[str, object] | None
+) -> str:
+    """Compose the LLM prompt for blog requests using persona and latest info."""
+
+    latest_info_block = "最新情報が見つかりませんでした。"
+    if latest_entry:
+        latest_info_block = "\n".join(
+            [
+                f"- タイトル: {latest_entry.get('title', '')}",
+                f"- URL: {latest_entry.get('url', '')}",
+                f"- 要約: {latest_entry.get('summary', '')}",
+                f"- 公開日時: {latest_entry.get('published', '')}",
+            ]
+        )
+
+    return (
+        "ブログの概要要素を作成してください。\n"
+        f"依頼内容: {original_prompt}\n"
+        f"選択キーワード: {keyword}\n"
+        "\n[ペルソナ情報]\n"
+        f"{persona_text}\n"
+        "\n[最新情報]\n"
+        f"{latest_info_block}\n"
+        "\n出力要件:\n"
+        "- タイトル（50文字以内）\n"
+        "- ディスクリプション（約200文字）\n"
+        "- タグを6つ（箇条書き）\n"
+        "- セクション名を7つ（箇条書き）\n"
+        "すべて日本語で、ペルソナに刺さる語り口にしてください。"
+    )
 
 
 def generate_openai_completion(prompt: str, model: str) -> tuple[str | None, str | None]:
@@ -150,21 +256,30 @@ def respond_to_instruction(
     if not prompt_text:
         raise ValueError("Prompt text is required.")
 
+    final_prompt = prompt_text
+    if BLOG_TRIGGER_PHRASE in prompt_text:
+        keyword = random.choice(BLOG_KEYWORDS)
+        persona_text = _load_persona_text()
+        latest_entry = _select_latest_entry(keyword)
+        final_prompt = build_blog_generation_prompt(
+            prompt_text, persona_text, keyword, latest_entry
+        )
+
     selected_provider = provider or DEFAULT_PROVIDER
     selected_model = model or DEFAULT_MODEL
     selected_api_base = api_base or DEFAULT_API_BASE
 
     if selected_provider == "ollama":
         completion, error = generate_ollama_completion(
-            prompt_text, selected_model, selected_api_base
+            final_prompt, selected_model, selected_api_base
         )
     else:
-        completion, error = generate_openai_completion(prompt_text, selected_model)
+        completion, error = generate_openai_completion(final_prompt, selected_model)
 
     if completion is None:
         completion = "LLM 応答を生成できませんでした。詳細は error を確認してください。"
 
-    html_document = build_html(prompt_text, completion, selected_model, error)
+    html_document = build_html(final_prompt, completion, selected_model, error)
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     resolved_filename = filename or f"client_response_{datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}.html"
