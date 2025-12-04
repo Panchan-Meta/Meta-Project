@@ -13,7 +13,7 @@ from urllib.request import Request, urlopen
 
 OUTPUT_DIR = Path("/mnt/hgfs/output")
 INDEX_PATH = Path("indexes/index.json")
-PERSONA_PATH = Path("mybrain/knowledge.md")
+PERSONA_PATH = Path("indexes/mybrain/knowledge.md")
 DEFAULT_MODEL = "phi3:mini"
 DEFAULT_PROVIDER = "ollama"
 DEFAULT_API_BASE = "http://127.0.0.1:11434"
@@ -47,7 +47,7 @@ BLOG_WORKFLOW_GUIDE = """
 
 【参照するデータ】
 - インデックス: indexes/index.json — セクションのキーとなる文章に近いタイトルやサマリーを探します。
-- 知識ベース: mybrain/knowledge.md — Rahab Punkaholic Girls/Johanne の世界観や読者像を補足します。
+- 知識ベース: indexes/mybrain/knowledge.md — Rahab Punkaholic Girls/Johanne の世界観や読者像を補足します。
 
 【生成手順】
 1. 概論 (500 文字程度)
@@ -65,7 +65,7 @@ BLOG_WORKFLOW_GUIDE = """
 - 概論はすでに用意済み。これから「{section_title}」セクション本文（約1,500文字）を書いてください。
 - セクションの意図: {section_lead}
 - 参考インデックス: indexes/index.json から近い要素を要約として活用。
-- 読者像と世界観: mybrain/knowledge.md にある Johanne の嗜好・不安・期待を踏まえる。
+- 読者像と世界観: indexes/mybrain/knowledge.md にある Johanne の嗜好・不安・期待を踏まえる。
 - 構成: 主張 → 根拠/事例 → 示唆 → 次節へのブリッジ。
 - トーン: パンクな反骨と冷静な分析が同居する語り口。過度な煽りや専門用語の羅列は避ける。
 

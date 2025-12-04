@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Iterable
 from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlsplit, urlunsplit
 
-BASE_DIR = Path("/var/www/Meta-Project/indexes")
+BASE_DIR = Path("indexes")
 CATEGORY_NAME = "Music"
 OLD_FILE_THRESHOLD = timedelta(days=7)
 FEEDS: tuple[str, ...] = (
