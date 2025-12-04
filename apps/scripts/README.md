@@ -57,4 +57,4 @@ JSON リクエスト例:
 
 ## ブログ生成フロー
 
-ブログの概論（約 500 文字）とセクション本文（各 1,500 文字）を生成する際のプロンプト設計とデータ参照手順は、クライアントには公開せず `client_instruction_responder.py` 内の `BLOG_WORKFLOW_GUIDE` に埋め込んでいます。`indexes/index.json` のサマリーと `indexes/mybrain/knowledge.md` の読者像を組み合わせて LLM に渡すワークフローを確認したいときは、コード内の定数を参照してください。
+ブログの概論（約 500 文字）とセクション本文（各 1,500 文字）を生成する際のプロンプト設計とデータ参照手順は、クライアントには公開せず `client_instruction_responder.py` 内の `BLOG_WORKFLOW_GUIDE` に埋め込んでいます。`indexes/` 配下のテキストファイル（mybrain 配下を除く）と `indexes/mybrain/` 配下のテキストファイルを組み合わせて LLM に渡すワークフローを確認したいときは、コード内の定数を参照してください。
