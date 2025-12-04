@@ -54,3 +54,8 @@ JSON リクエスト例:
   "filename": "任意のファイル名.html"
 }
 ```
+
+## ブログ生成フロー
+
+ブログの概論（約 500 文字）とセクション本文（各 1,500 文字）を生成する際のプロンプト設計とデータ参照手順をまとめたドキュメントを追加しました。`indexes/index.json` のサマリーと `mybrain/knowledge.md` の読者像を組み合わせて LLM に渡すワークフローを確認したいときは、[`BLOG_WORKFLOW.md`](./BLOG_WORKFLOW.md) を参照してください。
+このドキュメントはスクリプトから自動で呼ばれるものではなく、`client_instruction_responder.py` や `blog_server.py` でプロンプトを組む際の手元ガイドとして読みながら使う想定です。
