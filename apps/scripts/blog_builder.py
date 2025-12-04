@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Iterable, Mapping
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "apps" / "logs"
+DEFAULT_OUTPUT_DIR = Path("/mnt/hgfs/output")
 DEFAULT_INDEX_FILE = PROJECT_ROOT / "indexes" / "index.json"
 DEFAULT_KNOWLEDGE_FILE = PROJECT_ROOT / "mybrain" / "knowledge.md"
 
