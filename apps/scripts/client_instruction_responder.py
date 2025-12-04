@@ -12,8 +12,8 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 OUTPUT_DIR = Path("/mnt/hgfs/output")
-INDEX_PATH = Path("indexes/index.json")
-PERSONA_PATH = Path("mybrain/knowledge.md")
+INDEX_ROOT = Path("indexes")
+PERSONA_ROOT = INDEX_ROOT / "mybrain"
 DEFAULT_MODEL = "phi3:mini"
 DEFAULT_PROVIDER = "ollama"
 DEFAULT_API_BASE = "http://127.0.0.1:11434"
@@ -46,16 +46,16 @@ BLOG_WORKFLOW_GUIDE = """
 クライアントから「ブログを書いてほしい」と要望を受けたときに、`client_instruction_responder.py` や `blog_server.py` で LLM に投げるプロンプトの作り方をまとめました。概論は 500 文字前後、各セクション本文は 1,500 文字前後で生成することを前提にしています。
 
 【参照するデータ】
-- インデックス: indexes/index.json — セクションのキーとなる文章に近いタイトルやサマリーを探します。
-- 知識ベース: mybrain/knowledge.md — Rahab Punkaholic Girls/Johanne の世界観や読者像を補足します。
+- インデックス: indexes/ 配下のテキストファイル（mybrain 以外）— セクションのキーとなる文章に近いタイトルやサマリーを探します。
+- 知識ベース: indexes/mybrain/ 配下のテキストファイル — Rahab Punkaholic Girls/Johanne の世界観や読者像を補足します。
 
 【生成手順】
 1. 概論 (500 文字程度)
-   - `index.json` 全体と `knowledge.md` の要点を読み、ブログ全体の背景と狙いを 500 文字前後の日本語で要約するように LLM に依頼します。
+   - インデックス用テキストと知識ベース用テキストの要点を横断し、ブログ全体の背景と狙いを 500 文字前後の日本語で要約するように LLM に依頼します。
    - 「索引用のエントリを横断し、読者像にフィットする導入にする」と明示すると、セクション本文とのつながりが良くなります。
 2. セクション本文 (各 1,500 文字程度)
-   - セクション見出しやリード文をキーに `index.json` を照合し、最も近いエントリの `summary` を詳細素材として抽出します。
-   - `knowledge.md` から Johanne の嗜好・不安・期待に触れる記述を併用し、読者文脈を補強します。
+   - セクション見出しやリード文をキーに、indexes/ 内の関連テキスト（mybrain 以外）から要約素材を抽出します。
+   - indexes/mybrain/ 内のテキストから Johanne の嗜好・不安・期待に触れる記述を併用し、読者文脈を補強します。
    - 上記 2 つの素材をひとつのプロンプトにまとめ、1,500 文字前後の本文生成を指示します。構成（主張→根拠→示唆→次節へのブリッジ）を指定すると安定します。
 
 【プロンプト例】
@@ -64,15 +64,16 @@ BLOG_WORKFLOW_GUIDE = """
 あなたは日本語で執筆する編集ライターです。
 - 概論はすでに用意済み。これから「{section_title}」セクション本文（約1,500文字）を書いてください。
 - セクションの意図: {section_lead}
-- 参考インデックス: indexes/index.json から近い要素を要約として活用。
-- 読者像と世界観: mybrain/knowledge.md にある Johanne の嗜好・不安・期待を踏まえる。
+- 参考インデックス: indexes/ にある関連テキストを要約として活用（mybrain 配下は除外）。
+- 読者像と世界観: indexes/mybrain/ にあるテキストで Johanne の嗜好・不安・期待を踏まえる。
 - 構成: 主張 → 根拠/事例 → 示唆 → 次節へのブリッジ。
 - トーン: パンクな反骨と冷静な分析が同居する語り口。過度な煽りや専門用語の羅列は避ける。
 
 【運用メモ】
 - 概論と各セクションを別々に生成し、最終的に一つの HTML に結合します。`client_instruction_responder.py` には `--filename` でファイル名を指定できます。
-- LLM への入力が長くなる場合は、`index.json` の該当エントリのみを貼り付けるか、サマリー部分だけを引用してください。
+- LLM への入力が長くなる場合は、索引用テキストの該当ファイルだけを貼り付けるか、要約部分だけを引用してください。
 """.strip()
+
 SYSTEM_PROMPT = """
 あなたは日本語で簡潔に回答するアシスタントです。依頼内容を整理し、必要に応じて箇条書きでわかりやすくまとめてください。
 """.strip()
@@ -90,33 +91,84 @@ def _htmlize_text(text: str) -> str:
     return escaped.replace("\n", "<br/>")
 
 
-def _load_persona_text() -> str:
-    """Read persona information from the local knowledge base if available."""
+def _is_relative_to(path: Path, other: Path) -> bool:
+    """Compatibility helper for Path.is_relative_to on older Python."""
 
     try:
-        return PERSONA_PATH.read_text(encoding="utf-8").strip()
-    except FileNotFoundError:
+        path.relative_to(other)
+        return True
+    except ValueError:
+        return False
+
+
+def _read_text_files(base_dir: Path, *, exclude_dirs: set[Path] | None = None) -> list[tuple[Path, str]]:
+    """Collect text files under the given directory, excluding specified folders."""
+
+    exclude_dirs = exclude_dirs or set()
+    if not base_dir.exists():
+        return []
+
+    results: list[tuple[Path, str]] = []
+    for path in sorted(base_dir.rglob("*.txt")):
+        if any(_is_relative_to(path, excluded) for excluded in exclude_dirs):
+            continue
+        try:
+            content = path.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            continue
+
+        if not content:
+            continue
+
+        results.append((path, content))
+
+    return results
+
+
+def _load_persona_text() -> str:
+    """Read persona information from text files under the knowledge base directory."""
+
+    persona_files = _read_text_files(PERSONA_ROOT)
+    if not persona_files:
         return "ペルソナ情報は利用できませんでした。"
+
+    return "\n\n".join(
+        f"[{path.relative_to(PERSONA_ROOT)}]\n{content}" for path, content in persona_files
+    )
 
 
 def _load_index_text() -> str:
-    """Return the raw index file content to attach as knowledge."""
+    """Return combined index text (excluding the knowledge base directory)."""
 
-    try:
-        return INDEX_PATH.read_text(encoding="utf-8").strip()
-    except FileNotFoundError:
+    index_files = _read_text_files(INDEX_ROOT, exclude_dirs={PERSONA_ROOT})
+    if not index_files:
         return ""
+
+    return "\n\n".join(
+        f"[{path.relative_to(INDEX_ROOT)}]\n{content}" for path, content in index_files
+    )
 
 
 def _load_index_entries() -> list[dict[str, object]]:
-    """Load index entries from the attached directory if present."""
+    """Represent index entries from text files for keyword matching."""
 
-    try:
-        return json.loads(INDEX_PATH.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return []
-    except json.JSONDecodeError:
-        return []
+    entries: list[dict[str, object]] = []
+    for path, content in _read_text_files(INDEX_ROOT, exclude_dirs={PERSONA_ROOT}):
+        try:
+            modified = datetime.fromtimestamp(path.stat().st_mtime).isoformat()
+        except FileNotFoundError:
+            modified = ""
+
+        entries.append(
+            {
+                "title": path.stem,
+                "summary": content,
+                "published": modified,
+                "path": str(path.relative_to(INDEX_ROOT)),
+            }
+        )
+
+    return entries
 
 
 def _parse_published(value: object) -> datetime:
@@ -160,9 +212,9 @@ def build_blog_generation_prompt(
         latest_info_block = "\n".join(
             [
                 f"- タイトル: {latest_entry.get('title', '')}",
-                f"- URL: {latest_entry.get('url', '')}",
+                f"- ファイル: {latest_entry.get('path', '')}",
                 f"- 要約: {latest_entry.get('summary', '')}",
-                f"- 公開日時: {latest_entry.get('published', '')}",
+                f"- 最終更新: {latest_entry.get('published', '')}",
             ]
         )
 

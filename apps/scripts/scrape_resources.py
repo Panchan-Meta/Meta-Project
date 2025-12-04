@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Iterable, Mapping
 from urllib.parse import urljoin
 
-BASE_DIR: Path = Path("/var/www/Meta-Project/indexes")
+BASE_DIR: Path = Path("indexes")
 
 CATEGORIES: Mapping[str, tuple[str, ...]] = {
     "Python": (
