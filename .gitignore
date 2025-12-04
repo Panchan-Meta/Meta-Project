@@ -1,5 +1,8 @@
 apps/logs/
 indexes/*
-!indexes/index.json
+!indexes/*.txt
+!indexes/mybrain/
+indexes/mybrain/*
+!indexes/mybrain/*.txt
 __pycache__/
 *.pyc

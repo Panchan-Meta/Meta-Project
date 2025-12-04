@@ -12,8 +12,9 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 OUTPUT_DIR = Path("/mnt/hgfs/output")
-INDEX_PATH = Path("indexes/index.json")
-PERSONA_PATH = Path("mybrain/knowledge.md")
+INDEXES_DIR = Path("indexes")
+KNOWLEDGE_BASE_DIR = INDEXES_DIR / "mybrain"
+TEXT_EXTENSIONS = {".txt"}
 DEFAULT_MODEL = "phi3:mini"
 DEFAULT_PROVIDER = "ollama"
 DEFAULT_API_BASE = "http://127.0.0.1:11434"
@@ -57,83 +58,61 @@ def _htmlize_text(text: str) -> str:
     return escaped.replace("\n", "<br/>")
 
 
-def _load_persona_text() -> str:
-    """Read persona information from the local knowledge base if available."""
+def _read_text_files(directory: Path) -> list[tuple[str, str]]:
+    """Read all text files under the given directory."""
 
-    try:
-        return PERSONA_PATH.read_text(encoding="utf-8").strip()
-    except FileNotFoundError:
-        return "ペルソナ情報は利用できませんでした。"
+    if not directory.exists():
+        return []
+
+    contents: list[tuple[str, str]] = []
+    for path in sorted(directory.rglob("*")):
+        if not path.is_file() or path.suffix.lower() not in TEXT_EXTENSIONS:
+            continue
+
+        try:
+            text = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+
+        if text:
+            relative = str(path.relative_to(directory))
+            contents.append((relative, text))
+
+    return contents
+
+
+def _bundle_texts(directory: Path) -> str:
+    """Bundle text files with their relative paths as headings."""
+
+    texts = _read_text_files(directory)
+    if not texts:
+        return ""
+
+    return "\n\n".join([f"[{name}]\n{content}" for name, content in texts])
+
+
+def _load_persona_text() -> str:
+    """Read persona information from text files in the knowledge base directory."""
+
+    persona_text = _bundle_texts(KNOWLEDGE_BASE_DIR)
+    return persona_text or "ペルソナ情報は利用できませんでした。"
 
 
 def _load_index_text() -> str:
-    """Return the raw index file content to attach as knowledge."""
+    """Return concatenated text content from the attached indexes directory."""
 
-    try:
-        return INDEX_PATH.read_text(encoding="utf-8").strip()
-    except FileNotFoundError:
-        return ""
-
-
-def _load_index_entries() -> list[dict[str, object]]:
-    """Load index entries from the attached directory if present."""
-
-    try:
-        return json.loads(INDEX_PATH.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return []
-    except json.JSONDecodeError:
-        return []
-
-
-def _parse_published(value: object) -> datetime:
-    try:
-        return datetime.fromisoformat(str(value))
-    except Exception:
-        return datetime.min
-
-
-def _select_latest_entry(keyword: str) -> dict[str, object] | None:
-    """Pick the latest index entry, prioritizing those matching the keyword."""
-
-    entries = _load_index_entries()
-    if not entries:
-        return None
-
-    keyword_lower = keyword.casefold()
-
-    def matches(entry: dict[str, object]) -> bool:
-        haystack = f"{entry.get('title', '')} {entry.get('summary', '')}".casefold()
-        return keyword_lower in haystack
-
-    filtered = [entry for entry in entries if matches(entry)]
-    candidates = filtered or entries
-
-    candidates.sort(key=lambda entry: _parse_published(entry.get("published")), reverse=True)
-    return candidates[0] if candidates else None
+    return _bundle_texts(INDEXES_DIR)
 
 
 def build_blog_generation_prompt(
     original_prompt: str,
     persona_text: str,
     keyword: str,
-    latest_entry: dict[str, object] | None,
     index_text: str,
 ) -> str:
-    """Compose the LLM prompt for rich HTML blog requests using persona and latest info."""
+    """Compose the LLM prompt for rich HTML blog requests using attached text files."""
 
-    latest_info_block = "最新情報が見つかりませんでした。"
-    if latest_entry:
-        latest_info_block = "\n".join(
-            [
-                f"- タイトル: {latest_entry.get('title', '')}",
-                f"- URL: {latest_entry.get('url', '')}",
-                f"- 要約: {latest_entry.get('summary', '')}",
-                f"- 公開日時: {latest_entry.get('published', '')}",
-            ]
-        )
-
-    index_block = index_text or "インデックスファイルが添付されていません。"
+    index_block = index_text or "添付テキストファイルが見つかりませんでした。"
 
     return (
         "以下の条件でリッチHTMLのブログ記事を作成してください。\n"
@@ -141,9 +120,7 @@ def build_blog_generation_prompt(
         f"選択キーワード: {keyword}\n"
         "\n[ペルソナ情報]\n"
         f"{persona_text}\n"
-        "\n[最新情報]\n"
-        f"{latest_info_block}\n"
-        "\n[添付インデックスファイル]\n"
+        "\n[添付テキスト]\n"
         f"{index_block}\n"
         "\n[図解の使い方]\n"
         "- 3〜5 個の図解を HTML で埋め込み、<figure class=\"diagram\"> で囲んでください。\n"
@@ -158,7 +135,7 @@ def build_blog_generation_prompt(
         "- <footer> にリスクと対処法の要約、今後の展望や ToDo を簡潔にまとめるブロックを置いてください。\n"
         "\n[執筆要件]\n"
         "- すべて日本語で、ペルソナに刺さる語り口にしてください。\n"
-        "- 添付インデックスファイルと最新情報を引用し、本文で要約できるように重要トピックを整理してください。\n"
+        "- 添付テキストファイルを引用し、本文で要約できるように重要トピックを整理してください。\n"
         "- 図解のキャプションに図の種類を明記し、本文の要点と整合させてください。\n"
     )
 
@@ -286,10 +263,9 @@ def respond_to_instruction(
     if BLOG_TRIGGER_PHRASE in prompt_text:
         keyword = random.choice(BLOG_KEYWORDS)
         persona_text = _load_persona_text()
-        latest_entry = _select_latest_entry(keyword)
         index_text = _load_index_text()
         final_prompt = build_blog_generation_prompt(
-            prompt_text, persona_text, keyword, latest_entry, index_text
+            prompt_text, persona_text, keyword, index_text
         )
 
     selected_provider = provider or DEFAULT_PROVIDER
