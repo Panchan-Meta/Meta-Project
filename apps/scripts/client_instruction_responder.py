@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -199,10 +200,31 @@ def _build_conclusion_prompt(metadata: dict[str, object], article: str, diagram_
 
 
 def _parse_json_response(content: str) -> dict[str, object]:
-    try:
-        return json.loads(content)
-    except json.JSONDecodeError as exc:
-        raise ValueError("LLM did not return valid JSON") from exc
+    """Parse JSON content while tolerating markdown fences or extra text."""
+
+    def _loads(candidate: str) -> dict[str, object]:
+        return json.loads(candidate)
+
+    candidates: list[str] = [content]
+
+    # Remove markdown-style code fences (```json ... ```)
+    fence_pattern = re.compile(r"^```(?:json)?\s*|\s*```$", flags=re.IGNORECASE)
+    stripped = fence_pattern.sub("", content)
+    if stripped != content:
+        candidates.append(stripped)
+
+    # Extract the first JSON object if extra narration surrounds it
+    object_match = re.search(r"\{[\s\S]*\}", content)
+    if object_match:
+        candidates.append(object_match.group(0))
+
+    for candidate in candidates:
+        try:
+            return _loads(candidate)
+        except json.JSONDecodeError:
+            continue
+
+    raise ValueError("LLM did not return valid JSON")
 
 
 def respond_to_instruction(
