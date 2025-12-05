@@ -76,7 +76,7 @@ def fetch_and_save(url: str, destination: Path) -> bytes:
     request = urllib.request.Request(
         normalized_url, headers={"User-Agent": "Mozilla/5.0"}
     )
-    with urllib.request.urlopen(request, timeout=30) as response:
+    with urllib.request.urlopen(request, timeout=60) as response:
         content = response.read()
 
     destination.write_bytes(content)
