@@ -72,7 +72,7 @@ class LLMClient:
     def __init__(self, api_base: str = DEFAULT_API_BASE) -> None:
         self.api_base = api_base.rstrip("/")
 
-    def generate(self, model: str, prompt: str, timeout: int = 120) -> LLMResult:
+    def generate(self, model: str, prompt: str, timeout: int = 240) -> LLMResult:
         payload = {"model": model, "prompt": prompt, "stream": False}
         body = json.dumps(payload).encode("utf-8")
         request = Request(
