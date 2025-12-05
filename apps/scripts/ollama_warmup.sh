@@ -12,8 +12,9 @@ echo "[ollama-warmup] ウォームアップを開始します (BASE_URL=${BASE_U
 curl -sS "${BASE_URL}/api/tags" > /dev/null 2>&1 || exit 0
 
 # ---- 2. モデルを pull（既にある場合は何もしない）----
-ollama pull phi3:mini  > /dev/null 2>&1 || true
-ollama pull llama3:8b   > /dev/null 2>&1 || true
+ollama pull phi3:mini    > /dev/null 2>&1 || true
+ollama pull llama3:8b    > /dev/null 2>&1 || true
+ollama pull codegemma:2b > /dev/null 2>&1 || true
 
 # ---- 3. /api/generate で各モデルをウォームアップ ----
 warm_model () {
@@ -34,5 +35,7 @@ warm_model () {
 
 warm_model "phi3:mini"
 warm_model "llama3:8b"
+warm_model "codegemma:2b"
 
 echo "[ollama-warmup] すべてのウォームアップが完了しました"
+

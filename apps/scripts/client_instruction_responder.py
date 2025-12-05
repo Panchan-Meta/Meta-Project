@@ -12,6 +12,9 @@ customised per request.
 """
 from __future__ import annotations
 
+# ファイル先頭の import 群に追加
+import time
+import traceback
 import json
 import os
 import re
@@ -69,10 +72,16 @@ class LLMResult:
 class LLMClient:
     """Minimal Ollama client for single-shot generations."""
 
-    def __init__(self, api_base: str = DEFAULT_API_BASE) -> None:
+    # default_timeout を None にすると「無制限」
+    def __init__(self, api_base: str = DEFAULT_API_BASE, default_timeout: int | None = None) -> None:
         self.api_base = api_base.rstrip("/")
+        self.default_timeout = default_timeout
 
-    def generate(self, model: str, prompt: str, timeout: int = 120) -> LLMResult:
+    def generate(self, model: str, prompt: str, timeout: int | None = None) -> LLMResult:
+        # 個別指定がなければ default_timeout を使う
+        if timeout is None:
+            timeout = self.default_timeout
+
         payload = {"model": model, "prompt": prompt, "stream": False}
         body = json.dumps(payload).encode("utf-8")
         request = Request(
@@ -80,11 +89,19 @@ class LLMClient:
             data=body,
             headers={"Content-Type": "application/json"},
         )
+
         try:
-            with urlopen(request, timeout=timeout) as response:  # noqa: S310 (local API)
+            # timeout が None なら「タイムアウト指定なし」で呼ぶ
+            if timeout is None:
+                response = urlopen(request)  # ← timeout 引数なし
+            else:
+                response = urlopen(request, timeout=timeout)
+
+            with response:
                 data = json.loads(response.read().decode("utf-8"))
-        except URLError as exc:  # pragma: no cover - network exceptions
-            raise RuntimeError(f"Failed to reach LLM API: {exc}") from exc
+
+        except URLError as exc:
+            raise RuntimeError(f"LLM request failed or timed out: {exc}") from exc
 
         content = data.get("response") or ""
         if not isinstance(content, str):
@@ -237,12 +254,16 @@ def respond_to_instruction(
 ) -> dict[str, object]:
     """Generate blog HTML following the requested multi-step workflow."""
 
+    start_all = time.perf_counter()
+    print("[BLOG] respond_to_instruction start")
+
     index_root = DEFAULT_INDEX_DIR if DEFAULT_INDEX_DIR.exists() else FALLBACK_INDEX_DIR
     knowledge_root = (
         DEFAULT_KNOWLEDGE_ROOT if DEFAULT_KNOWLEDGE_ROOT.exists() else index_root / "mybrain"
     )
     client = LLMClient(api_base=api_base)
 
+    print("[BLOG] step1: find latest index")
     latest_index_path = _find_latest_index(index_root, KEYWORDS)
     index_text = _read_optional_text(latest_index_path)
     knowledge = _gather_knowledge(knowledge_root)
@@ -250,21 +271,42 @@ def respond_to_instruction(
         fallback_md = knowledge_root / "knowledge.md"
         knowledge = _read_optional_text(fallback_md)
 
-    metadata_prompt = _build_metadata_prompt(index_text)
-    metadata_raw = client.generate(model=model, prompt=metadata_prompt)
-    metadata = _parse_json_response(metadata_raw.response)
+    try:
+        print("[BLOG] step2: metadata LLM call")
+        t0 = time.perf_counter()
+        metadata_prompt = _build_metadata_prompt(index_text)
+        metadata_raw = client.generate(model=model, prompt=metadata_prompt)
+        metadata = _parse_json_response(metadata_raw.response)
+        print(f"[BLOG]   metadata done in {time.perf_counter() - t0:.1f}s")
 
-    article_prompt = _build_article_prompt(metadata, index_text, knowledge)
-    article_result = client.generate(model=model, prompt=article_prompt)
+        print("[BLOG] step3: article LLM call")
+        t0 = time.perf_counter()
+        article_prompt = _build_article_prompt(metadata, index_text, knowledge)
+        article_result = client.generate(model=model, prompt=article_prompt)
+        print(f"[BLOG]   article done in {time.perf_counter() - t0:.1f}s")
 
-    diagram_prompt = _build_diagram_prompt(metadata, index_text)
-    diagram_result = client.generate(model=DIAGRAM_MODEL, prompt=diagram_prompt)
+        print("[BLOG] step4: diagram LLM call")
+        t0 = time.perf_counter()
+        diagram_prompt = _build_diagram_prompt(metadata, index_text)
+        diagram_result = client.generate(model=DIAGRAM_MODEL, prompt=diagram_prompt)
+        print(f"[BLOG]   diagram done in {time.perf_counter() - t0:.1f}s")
 
-    conclusion_prompt = _build_conclusion_prompt(
-        metadata, article_result.response, diagram_result.response
-    )
-    conclusion_result = client.generate(model=model, prompt=conclusion_prompt)
+        print("[BLOG] step5: conclusion LLM call")
+        t0 = time.perf_counter()
+        conclusion_prompt = _build_conclusion_prompt(
+            metadata, article_result.response, diagram_result.response
+        )
+        conclusion_result = client.generate(model=model, prompt=conclusion_prompt)
+        print(f"[BLOG]   conclusion done in {time.perf_counter() - t0:.1f}s")
 
+    except Exception:
+        # どのステップで落ちたかログに出す
+        print("[BLOG] ERROR in LLM workflow", file=sys.stderr)
+        traceback.print_exc()
+        raise
+
+    print(f"[BLOG] all steps done in {time.perf_counter() - start_all:.1f}s")
+    
     html_parts = [
         "<article>",
         f"<h1>{metadata.get('title', 'Blog Draft')}</h1>",
@@ -311,3 +353,5 @@ __all__ = [
     "DEFAULT_PROVIDER",
     "DEFAULT_API_BASE",
 ]
+
+
