@@ -1,7 +1,4 @@
 apps/logs/
 indexes/*
-!indexes/index.json
-!indexes/mybrain/
-!indexes/mybrain/knowledge.md
 __pycache__/
 *.pyc
