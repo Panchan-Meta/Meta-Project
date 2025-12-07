@@ -73,6 +73,12 @@ MODEL_PHI3 = "phi3:mini"
 MODEL_LLAMA3 = "llama3:8b"
 MODEL_CODEGEMMA = "codegemma:2b"
 
+DIAGRAM_LANG_CONFIG = {
+    "ja": {"label": "Japanese", "heading": "主要ポイント"},
+    "en": {"label": "English", "heading": "Key Takeaways"},
+    "it": {"label": "Italian", "heading": "Punti chiave"},
+}
+
 # キーワード一覧（例）
 KEYWORDS = [
     "Punk Rock NFT",
@@ -319,7 +325,7 @@ def generate_metadata_with_phi3(keyword: str, index_text: str) -> Dict[str, Any]
     """
     prompt = textwrap.dedent(
         f"""
-        あなたは「哲学者気取りのヨハネ」というペルソナに向けた
+        あなたは「Panchan」というペルソナに向けた
         日本語ブログの編集者です。
         テーマは「{keyword}」です。
 
@@ -548,25 +554,24 @@ def clean_paragraphs(text: str, max_chars: int = 1600) -> str:
 
 
 def write_section_html_with_codegemma(
-    section_title_en: str,
-    section_body_en: str,
+    section_title: str,
+    section_body: str,
+    diagram_language: str,
 ) -> str:
     """
     codegemma:2b に、セクション内容を可視化する
     リッチな HTML (JS + CSS 込み) を作らせる。
-
-    図解内のテキスト（タイトル・ラベル等）はすべて英語に統一する。
     """
     prompt = textwrap.dedent(
         f"""
         You are a front-end engineer and data-visualization designer.
-        Based on the following ENGLISH section of an article, create ONE rich,
+        Based on the following section of an article, create ONE rich,
         self-contained HTML snippet that visually explains the core ideas.
 
         IMPORTANT LANGUAGE RULES:
         - All text INSIDE the diagram (titles, labels, legends, tooltips, etc.)
-          MUST be in English.
-        - Do NOT output any Japanese in the diagram.
+          MUST be in {diagram_language}.
+        - Do NOT mix other languages inside the visual content.
 
         VISUAL REQUIREMENTS:
         - Do NOT just output a simple <ul> with bullet points.
@@ -580,16 +585,17 @@ def write_section_html_with_codegemma(
           * simple chart that updates on click.
         - Use a responsive layout with flexbox or CSS grid.
 
-        DIAGRAM PATTERNS (pick ONE that fits best):
-        - Article roadmap / progress tracker (Sections 1–7)
-        - Concept map / mind map
-        - Flowchart or step-by-step process
-        - Simple architecture / system diagram
-        - Comparison table styled with CSS
-        - Simple chart using <svg> (line / bar / pie)
-        - Risk matrix (probability × impact)
-        - Persona / use-case card layout
-        - Summary board of 3–5 key points
+        DIAGRAM PATTERNS (pick ONE that fits best, aligned with the list below):
+        - Article roadmap / progress tracker (セクション1〜7の全体像)
+        - Concept map / mind map（概念・用語の関係図）
+        - Flowchart or step-by-step process（仕組みやデータの流れ）
+        - Architecture / system diagram（全体構成図）
+        - Comparison table styled with CSS（比較表）
+        - Simple chart using <svg> (line / bar / pie)（数値・トレンド図）
+        - Step-by-step / checklist layout（手順・チェックリスト）
+        - Risk matrix (probability × impact)（リスク・注意点）
+        - Persona / use-case card layout（ペルソナ・ユースケース）
+        - Summary board of 3–5 key points（要点サマリー）
 
         HTML CONSTRAINTS:
         - The snippet will be injected inside:
@@ -597,17 +603,17 @@ def write_section_html_with_codegemma(
           so DO NOT include <html>, <head>, or <body> tags.
         - Start with:
               <section class="auto-visual">
-                <h3>{section_title_en} – [short diagram name]</h3>
+                <h3>{section_title} – [short diagram name]</h3>
                 ...
               </section>
         - Use only inline CSS (<style>) and inline JS (<script>).
         - Do NOT load external libraries (no CDN, no frameworks).
 
-        SECTION TITLE (English):
-        {section_title_en}
+        SECTION TITLE ({diagram_language}):
+        {section_title}
 
-        SECTION BODY (English):
-        {section_body_en}
+        SECTION BODY ({diagram_language}):
+        {section_body}
 
         Output ONLY the HTML snippet, with no explanation and no backticks.
         """
@@ -615,15 +621,19 @@ def write_section_html_with_codegemma(
     return call_ollama_generate(MODEL_CODEGEMMA, prompt)
 
 
-def build_fallback_visual(section_title_en: str, section_body_en: str) -> str:
+def build_fallback_visual(
+    section_title: str, section_body: str, heading_label: str = "Key Takeaways"
+) -> str:
     """LLM が HTML を返さない場合に備えた簡易ビジュアル。"""
-    sentences = [s.strip() for s in re.split(r"[.!?]\s+", section_body_en) if s.strip()]
-    bullets = sentences[:4] if sentences else [section_title_en]
-    items = "".join(f"<li>{textwrap.shorten(b, width=140, placeholder='…')}</li>" for b in bullets)
+    sentences = [s.strip() for s in re.split(r"[。.!?]\s*", section_body) if s.strip()]
+    bullets = sentences[:4] if sentences else [section_title]
+    items = "".join(
+        f"<li>{textwrap.shorten(b, width=140, placeholder='…')}</li>" for b in bullets
+    )
     return textwrap.dedent(
         f"""
         <section class="auto-visual fallback-visual">
-          <h3>{section_title_en} – Key Takeaways</h3>
+          <h3>{section_title} – {heading_label}</h3>
           <ul>{items}</ul>
           <style>
             .fallback-visual {{
@@ -648,16 +658,45 @@ def build_fallback_visual(section_title_en: str, section_body_en: str) -> str:
     ).strip()
 
 
-def ensure_visual_snippet(section_title_en: str, section_body_en: str, html_snippet: str) -> str:
+def ensure_visual_snippet(
+    section_title: str, section_body: str, html_snippet: str, heading_label: str
+) -> str:
     snippet = html_snippet.strip()
     if not snippet:
-        log(f"WARN: Empty visual snippet for section '{section_title_en}', using fallback.")
-        return build_fallback_visual(section_title_en, section_body_en)
+        log(f"WARN: Empty visual snippet for section '{section_title}', using fallback.")
+        return build_fallback_visual(section_title, section_body, heading_label)
     # LLM がコードではなく指示文だけ返したケースも補正
     if "<" not in snippet:
-        log(f"WARN: Visual snippet missing HTML tags for '{section_title_en}', using fallback.")
-        return build_fallback_visual(section_title_en, section_body_en)
+        log(
+            f"WARN: Visual snippet missing HTML tags for '{section_title}', using fallback."
+        )
+        return build_fallback_visual(section_title, section_body, heading_label)
     return snippet
+
+
+def generate_section_visuals(
+    sections: List[Dict[str, Any]],
+    section_bodies: List[str],
+    lang_code: str,
+) -> List[str]:
+    lang_config = DIAGRAM_LANG_CONFIG.get(lang_code, DIAGRAM_LANG_CONFIG["en"])
+    heading_label = lang_config.get("heading", "Key Takeaways")
+    diagram_language = lang_config.get("label", "English")
+
+    visuals: List[str] = []
+    for i, sec in enumerate(sections):
+        title = str(sec.get("title") or f"Section {i + 1}")
+        body = section_bodies[i] if i < len(section_bodies) else ""
+        log(
+            f"Generating {lang_code.upper()} HTML visual for section {i+1}: {title}"
+        )
+        html_snippet = write_section_html_with_codegemma(
+            section_title=title,
+            section_body=body,
+            diagram_language=diagram_language,
+        )
+        visuals.append(ensure_visual_snippet(title, body, html_snippet, heading_label))
+    return visuals
 
 
 # ====== ステップ 5: 総論 ============================================
@@ -713,7 +752,7 @@ def build_html_document(
 ) -> str:
     """
     1言語分の HTML を組み立てる。
-    section_htmls は英語で書かれた図解 HTML を想定（3言語共通）。
+    section_htmls は各言語に合わせた図解 HTML。
     """
     title = str(meta.get("title") or "自動生成記事")
     description = str(meta.get("description") or "")
@@ -823,7 +862,7 @@ def main() -> None:
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    persona = "哲学者気取りのヨハネ"
+    persona = "Panchan"
 
     # 1) キーワードをランダムに選択
     keyword = random.choice(KEYWORDS)
@@ -923,18 +962,21 @@ def main() -> None:
     section_bodies_it = [translate_text(b, "Italian") for b in section_bodies_ja]
     conclusion_it = translate_text(conclusion_ja, "Italian")
 
-    # 8) 図解 HTML を英語テキストから生成（3言語共通）
-    log("Generating section visuals (HTML) from English sections...")
-    section_htmls: List[str] = []
-    for i, sec_en in enumerate(sections_en):
-        title_en = str(sec_en.get("title") or f"Section {i+1}")
-        body_en = section_bodies_en[i] if i < len(section_bodies_en) else ""
-        log(f"Generating HTML visual for section {i+1}: {title_en}")
-        html_snippet = write_section_html_with_codegemma(
-            section_title_en=title_en,
-            section_body_en=body_en,
-        )
-        section_htmls.append(ensure_visual_snippet(title_en, body_en, html_snippet))
+    # 8) 図解 HTML を各言語の本文から生成
+    log("Generating Japanese section visuals...")
+    section_htmls_ja = generate_section_visuals(
+        sections_ja, section_bodies_ja, lang_code="ja"
+    )
+
+    log("Generating English section visuals...")
+    section_htmls_en = generate_section_visuals(
+        sections_en, section_bodies_en, lang_code="en"
+    )
+
+    log("Generating Italian section visuals...")
+    section_htmls_it = generate_section_visuals(
+        sections_it, section_bodies_it, lang_code="it"
+    )
 
     # 9) HTML とメタ情報を保存
     now = dt.datetime.now()
@@ -953,7 +995,7 @@ def main() -> None:
         meta=meta_ja,
         sections=sections_ja,
         section_bodies=section_bodies_ja,
-        section_htmls=section_htmls,
+        section_htmls=section_htmls_ja,
         conclusion=conclusion_ja,
     )
     html_en = build_html_document(
@@ -961,7 +1003,7 @@ def main() -> None:
         meta=meta_en,
         sections=sections_en,
         section_bodies=section_bodies_en,
-        section_htmls=section_htmls,  # 図解は英語のまま共通
+        section_htmls=section_htmls_en,
         conclusion=conclusion_en,
     )
     html_it = build_html_document(
@@ -969,7 +1011,7 @@ def main() -> None:
         meta=meta_it,
         sections=sections_it,
         section_bodies=section_bodies_it,
-        section_htmls=section_htmls,
+        section_htmls=section_htmls_it,
         conclusion=conclusion_it,
     )
 
