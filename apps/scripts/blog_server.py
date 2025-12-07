@@ -144,7 +144,7 @@ def log(msg: str) -> None:
 def call_ollama_generate(model: str, prompt: str, temperature: float = 0.4) -> str:
     """
     Ollama /api/generate を叩いて単発プロンプトを投げる。
-    重い処理なのでタイムアウトは 900 秒に設定。
+    重い処理なのでタイムアウトは 1800 秒に設定。
     """
     url = f"{OLLAMA_BASE}/api/generate"
     payload = {
@@ -157,7 +157,7 @@ def call_ollama_generate(model: str, prompt: str, temperature: float = 0.4) -> s
     req = Request(url, data=data, headers={"Content-Type": "application/json"})
 
     try:
-        with urlopen(req, timeout=1200) as resp:
+        with urlopen(req, timeout=1800) as resp:
             body = resp.read().decode("utf-8")
         res = json.loads(body)
         return res.get("response", "").strip()
