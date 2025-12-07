@@ -71,7 +71,7 @@ TEXT_EXTS = {".txt", ".md", ".json", ".html", ".rst"}
 # 使うモデル名
 MODEL_PHI3 = "phi3:mini"
 MODEL_LLAMA3 = "llama3:8b"
-MODEL_CODEGEMMA = "codegemma:2b"
+MODEL_CODEGEMMA = "qwen2.5-coder:7b"
 
 DIAGRAM_LANG_CONFIG = {
     "ja": {"label": "Japanese", "heading": "主要ポイント"},
@@ -550,6 +550,66 @@ def clean_paragraphs(text: str, max_chars: int = 1600) -> str:
     return cleaned
 
 
+def normalize_description(
+    description: str, fallback: str = "", target: int = 200, tolerance: int = 40
+) -> str:
+    """
+    ブログのディスクリプションを約200文字に収める。
+
+    - 空なら fallback を簡易要約として利用する
+    - 長すぎる場合は target 付近で切り詰める
+    """
+
+    desc = (description or "").strip()
+    if not desc:
+        fallback_text = (fallback or "").strip()
+        if fallback_text:
+            desc = fallback_text[: target + tolerance]
+    if not desc:
+        return ""
+
+    max_len = target + tolerance
+    if len(desc) > max_len:
+        trimmed = desc[:target]
+        if "。" in trimmed:
+            trimmed = trimmed.rsplit("。", 1)[0] + "。"
+        desc = trimmed
+    return desc
+
+
+def normalize_tags(tags: Any, keyword: str, desired_count: int = 6) -> List[str]:
+    """
+    タグをちょうど6個に揃える。
+    足りない場合はキーワードベースのタグで補完する。
+    """
+
+    cleaned: List[str] = []
+    if isinstance(tags, list):
+        for t in tags:
+            tag_str = str(t).strip()
+            if tag_str and tag_str not in cleaned:
+                cleaned.append(tag_str)
+
+    base = keyword.strip() or "タグ"
+    while len(cleaned) < desired_count:
+        cleaned.append(f"{base} {len(cleaned) + 1}")
+
+    return cleaned[:desired_count]
+
+
+def normalize_metadata(meta: Dict[str, Any], keyword: str, description_source: str) -> Dict[str, Any]:
+    """
+    メタ情報の不足を補い、ディスクリプションとタグを所望の形式に整える。
+    """
+
+    normalized = dict(meta or {})
+    normalized["description"] = normalize_description(
+        normalized.get("description", ""), fallback=description_source
+    )
+    normalized["tags"] = normalize_tags(normalized.get("tags"), keyword)
+    return normalized
+
+
 # ====== 図解 HTML（英語タイトル＋英語本文ベース） ====================
 
 
@@ -886,6 +946,7 @@ def main() -> None:
     # 3) メタ情報を phi3 で生成（日本語）
     log("Generating Japanese metadata with phi3...")
     meta_ja = generate_metadata_with_phi3(keyword, index_text_full)
+    meta_ja = normalize_metadata(meta_ja, keyword, description_source=index_text_full[:240])
     if not meta_ja.get("title"):
         log("WARN: metadata title is empty; using keyword as fallback title.")
         meta_ja["title"] = keyword
