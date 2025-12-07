@@ -505,17 +505,43 @@ def write_section_body_with_llama3(
         {knowledge_text}
 
         上記をすべて踏まえて、このセクションの本文を**日本語だけで**
-        約1500文字の論文風に執筆してください。
+        1000〜1500文字を目安に論文風で執筆してください。
 
         条件:
         - 出力はすべて自然な日本語で書くこと（英語の文を混在させない）
         - セクションのタイトルと概要に沿った内容にすること
-        - 同じ文章の繰り返しは避けること
+        - 同じ文章の繰り返しや文字数稼ぎを避け、不要なら短くまとめること
         - 特定の企業・取引所・コイン等の宣伝は一切しないこと
         - 読者に思考を促すような哲学的な語り口にすること
         """
     )
     return call_ollama_generate(MODEL_LLAMA3, prompt)
+
+
+def clean_paragraphs(text: str, max_chars: int = 1600) -> str:
+    """
+    - 連続した重複段落を間引く
+    - 文字数が長すぎる場合は適度に切り詰める
+    """
+    cleaned_lines: List[str] = []
+    last_line = ""
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line == last_line:
+            continue
+        cleaned_lines.append(line)
+        last_line = line
+
+    cleaned = "\n".join(cleaned_lines)
+    if len(cleaned) > max_chars:
+        trimmed = cleaned[:max_chars]
+        # 文末で切れた場合は句点まで戻す
+        if "。" in trimmed:
+            trimmed = trimmed.rsplit("。", 1)[0] + "。"
+        cleaned = trimmed
+    return cleaned
 
 
 # ====== 図解 HTML（英語タイトル＋英語本文ベース） ====================
@@ -587,6 +613,51 @@ def write_section_html_with_codegemma(
         """
     )
     return call_ollama_generate(MODEL_CODEGEMMA, prompt)
+
+
+def build_fallback_visual(section_title_en: str, section_body_en: str) -> str:
+    """LLM が HTML を返さない場合に備えた簡易ビジュアル。"""
+    sentences = [s.strip() for s in re.split(r"[.!?]\s+", section_body_en) if s.strip()]
+    bullets = sentences[:4] if sentences else [section_title_en]
+    items = "".join(f"<li>{textwrap.shorten(b, width=140, placeholder='…')}</li>" for b in bullets)
+    return textwrap.dedent(
+        f"""
+        <section class="auto-visual fallback-visual">
+          <h3>{section_title_en} – Key Takeaways</h3>
+          <ul>{items}</ul>
+          <style>
+            .fallback-visual {{
+              border: 1px solid #d0d7de;
+              border-radius: 8px;
+              padding: 1rem;
+              background: #f8fafc;
+            }}
+            .fallback-visual h3 {{
+              margin-top: 0;
+              font-size: 1.1rem;
+            }}
+            .fallback-visual ul {{
+              padding-left: 1.2rem;
+              margin: 0.5rem 0 0;
+              display: grid;
+              gap: 0.3rem;
+            }}
+          </style>
+        </section>
+        """
+    ).strip()
+
+
+def ensure_visual_snippet(section_title_en: str, section_body_en: str, html_snippet: str) -> str:
+    snippet = html_snippet.strip()
+    if not snippet:
+        log(f"WARN: Empty visual snippet for section '{section_title_en}', using fallback.")
+        return build_fallback_visual(section_title_en, section_body_en)
+    # LLM がコードではなく指示文だけ返したケースも補正
+    if "<" not in snippet:
+        log(f"WARN: Visual snippet missing HTML tags for '{section_title_en}', using fallback.")
+        return build_fallback_visual(section_title_en, section_body_en)
+    return snippet
 
 
 # ====== ステップ 5: 総論 ============================================
@@ -670,6 +741,21 @@ def build_html_document(
     parts.append('<meta charset="UTF-8" />')
     parts.append(f"<title>{title}</title>")
     parts.append(f'<meta name="description" content="{description}">')
+    parts.append(
+        "<style>"
+        "html, body { min-height: 100%; margin: 0; padding: 0; }"
+        "body { font-family: 'Noto Sans JP', 'Helvetica Neue', Arial, sans-serif;"
+        " line-height: 1.6; font-size: 16px; color: #111;"
+        " padding: 1.5rem; box-sizing: border-box; overflow-y: auto; background: #fff; }"
+        "article { max-width: 960px; margin: 0 auto; }"
+        "section { margin-bottom: 2rem; }"
+        "header h1 { margin-bottom: 0.3rem; }"
+        "header p { margin: 0.2rem 0; }"
+        ".section-body { display: grid; gap: 0.8rem; }"
+        ".section-visual { background: #f7f8fa; border: 1px solid #e5e7eb;"
+        " padding: 1rem; border-radius: 10px; overflow-x: auto; }"
+        "</style>"
+    )
     parts.append("</head>")
     parts.append("<body>")
     parts.append("<article>")
@@ -788,7 +874,7 @@ def main() -> None:
             index_text=index_text_full,
             knowledge_text=knowledge_text,
         )
-        section_bodies_ja.append(body)
+        section_bodies_ja.append(clean_paragraphs(body))
 
     # 6) 総論を生成（日本語）
     log("Generating JA conclusion...")
@@ -798,6 +884,7 @@ def main() -> None:
         overview=overview_ja,
         all_section_bodies=section_bodies_ja,
     )
+    conclusion_ja = clean_paragraphs(conclusion_ja, max_chars=1800)
 
     # 7) 多言語版に翻訳（すべて llama3:8b）
     log("Translating metadata and bodies into English...")
@@ -847,7 +934,7 @@ def main() -> None:
             section_title_en=title_en,
             section_body_en=body_en,
         )
-        section_htmls.append(html_snippet)
+        section_htmls.append(ensure_visual_snippet(title_en, body_en, html_snippet))
 
     # 9) HTML とメタ情報を保存
     now = dt.datetime.now()
