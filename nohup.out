@@ -1,0 +1,115 @@
+[2025-12-06 17:49:35] === Blog generator started ===
+[2025-12-06 17:49:35] Selected keyword: Cyber Confession（サイバー懺悔室）
+[2025-12-06 17:58:39] Chosen index file: /var/www/Meta-Project/indexes/articles/Music/https_www_theaureview_com_join.html
+[2025-12-06 18:00:47] Metadata generated: title=サイバー懸念室への入会方法 - The AU Review
+[2025-12-06 18:03:54] Generated 7 sections
+[2025-12-06 18:03:54] Generating body for section 1: サイバー懸念とアカデミーの振り子
+[2025-12-06 18:14:45] Generating HTML snippet for section 1
+[2025-12-06 18:16:30] Generating body for section 2: AIと人間性の相互作用
+[2025-12-06 18:26:33] Generating HTML snippet for section 2
+[2025-12-06 18:28:37] Generating body for section 3: サイバーカウンセリングの新たな地平
+[2025-12-06 18:38:11] Generating HTML snippet for section 3
+[2025-12-06 18:39:07] Generating body for section 4: デジタルコミュニケーションの新しい感情
+[2025-12-06 18:49:12] Generating HTML snippet for section 4
+[2025-12-06 18:52:32] Generating body for section 5: 個人情報の暗号化とプライバシー
+[2025-12-06 19:02:45] Generating HTML snippet for section 5
+[2025-12-06 19:03:57] Generating body for section 6: サイバーセキュリティの未来
+[2025-12-06 19:14:33] Generating HTML snippet for section 6
+[2025-12-06 19:24:26] Generating body for section 7: サイバー懸念とアカデミーの反逆
+[2025-12-06 19:35:15] Generating HTML snippet for section 7
+[2025-12-06 19:40:16] Generating conclusion...
+[2025-12-06 19:50:57] Translating article into English...
+[2025-12-06 20:35:52] Translating article into Italian...
+[2025-12-07 05:22:39] Saved HTML (JA): /mnt/hgfs/output/20251207-052239_cyber-confession-サイバー懺悔室_ja.html
+[2025-12-07 05:22:39] Saved HTML (EN): /mnt/hgfs/output/20251207-052239_cyber-confession-サイバー懺悔室_en.html
+[2025-12-07 05:22:39] Saved HTML (IT): /mnt/hgfs/output/20251207-052239_cyber-confession-サイバー懺悔室_it.html
+[2025-12-07 05:22:39] Saved JSON meta: /mnt/hgfs/output/20251207-052239_cyber-confession-サイバー懺悔室_meta.json
+[2025-12-07 05:22:39] === Finished. Elapsed: 693.1 minutes ===
+[2025-12-07 05:37:50] === Blog generator started ===
+[2025-12-07 05:37:50] Selected keyword: World Bug Hunters（世界のバグハンター）
+Traceback (most recent call last):
+  File "/var/www/Meta-Project/apps/scripts/blog_server.py", line 797, in <module>
+    main()
+  File "/var/www/Meta-Project/apps/scripts/blog_server.py", line 638, in main
+    chosen_index = choose_index_with_phi3(keyword, index_files)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/www/Meta-Project/apps/scripts/blog_server.py", line 260, in choose_index_with_phi3
+    res = call_ollama_generate(MODEL_PHI3, prompt)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/www/Meta-Project/apps/scripts/blog_server.py", line 113, in call_ollama_generate
+    with urlopen(req, timeout=900) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 215, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 515, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 532, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 492, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 1373, in http_open
+    return self.do_open(http.client.HTTPConnection, req)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 1348, in do_open
+    r = h.getresponse()
+        ^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/http/client.py", line 1428, in getresponse
+    response.begin()
+  File "/usr/lib/python3.12/http/client.py", line 331, in begin
+    version, status, reason = self._read_status()
+                              ^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/http/client.py", line 292, in _read_status
+    line = str(self.fp.readline(_MAXLINE + 1), "iso-8859-1")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/socket.py", line 707, in readinto
+    return self._sock.recv_into(b)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt
+[2025-12-07 05:41:00] === Blog generator started ===
+[2025-12-07 05:41:00] Selected keyword: Web3 Dystopia（ウェブスリー・ディストピア）
+Traceback (most recent call last):
+  File "/var/www/Meta-Project/apps/scripts/blog_server.py", line 797, in <module>
+    main()
+  File "/var/www/Meta-Project/apps/scripts/blog_server.py", line 638, in main
+    chosen_index = choose_index_with_phi3(keyword, index_files)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/www/Meta-Project/apps/scripts/blog_server.py", line 260, in choose_index_with_phi3
+    res = call_ollama_generate(MODEL_PHI3, prompt)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/www/Meta-Project/apps/scripts/blog_server.py", line 113, in call_ollama_generate
+    with urlopen(req, timeout=900) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 215, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 515, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 532, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 492, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 1373, in http_open
+    return self.do_open(http.client.HTTPConnection, req)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 1348, in do_open
+    r = h.getresponse()
+        ^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/http/client.py", line 1428, in getresponse
+    response.begin()
+  File "/usr/lib/python3.12/http/client.py", line 331, in begin
+    version, status, reason = self._read_status()
+                              ^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/http/client.py", line 292, in _read_status
+    line = str(self.fp.readline(_MAXLINE + 1), "iso-8859-1")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/socket.py", line 707, in readinto
+    return self._sock.recv_into(b)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt

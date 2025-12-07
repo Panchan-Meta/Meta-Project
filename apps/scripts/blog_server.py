@@ -1,191 +1,919 @@
-"""Minimal HTTP server to receive client prompts and return generated blog HTML."""
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+auto_article_generator.py
+
+スクレイピング済みの indexes/articles 配下のインデックスを入口に、
+mybrain を含む知識ファイルをコンテキストにして 3言語記事を自動生成するスクリプト。
+
+フロー:
+ 1. キーワードを1つランダムに選択
+ 2. INDEX_ROOT 配下のインデックスファイルから、phi3:mini に選ばせる
+ 3. 選ばれたインデックスをもとに phi3:mini に
+      - タイトル(50字以内, 日本語)
+      - ディスクリプション(約200字, 日本語)
+      - タグ6つ (日本語)
+      - 概要(約500字, 日本語)
+    を JSON で生成させる
+ 4. 概要をもとに phi3:mini に 7 セクションのアウトラインを日本語で作らせる
+ 5. 各セクションごとに
+      - llama3:8b に約1500字の本文を書かせる（日本語のみ）
+ 6. すべての日本語本文をもとに、llama3:8b に約1500字の総論を書かせる（日本語のみ）
+ 7. 日本語 → 英語 / イタリア語に llama3:8b で翻訳して多言語版を作る
+ 8. 英語タイトル＋英語本文を元に、codegemma:2b でリッチな図解 HTML を作成
+ 9. 日本語・英語・イタリア語の3つのHTMLファイルとメタ情報(JSON)を保存する
+
+ログ:
+  - 各プロセスごとに /var/www/Meta-Project/apps/logs/Blog に
+    blog_YYYYMMDD-HHMMSS_pidXXXX.log を生成する。
+"""
 
 from __future__ import annotations
 
-import cgi
-import io
+import datetime as dt
 import json
-import sys
-from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import os
+import random
+import re
+import socket
+import textwrap
 from pathlib import Path
+from typing import Any, Dict, List, Optional
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
-CURRENT_DIR = Path(__file__).resolve().parent
-if str(CURRENT_DIR) not in sys.path:
-    sys.path.insert(0, str(CURRENT_DIR))
+# ====== 設定 =========================================================
 
-import client_instruction_responder as cir
+# Ollama のエンドポイント
+OLLAMA_BASE = os.environ.get("OLLAMA_API_BASE", "http://127.0.0.1:11434")
 
-UPLOAD_DIR = Path("/var/www/Meta-Project/data/client")
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+# インデックスのルート（スクレイピングしてきた記事群）
+INDEX_ROOT = Path("/var/www/Meta-Project/indexes/articles")
 
-MAX_ATTACHMENT_TEXT_CHARS = 15000
-READ_CHUNK_SIZE = 1024 * 1024  # 1 MB
+# 知識ファイルのルート（メモ・ナレッジなど）
+KNOWLEDGE_ROOT = Path("/var/www/Meta-Project/indexes/mybrain")
+
+# 出力先ディレクトリ (共有フォルダ側)
+DEFAULT_OUTPUT_DIR = Path("/mnt/hgfs/output")
+OUTPUT_DIR = DEFAULT_OUTPUT_DIR
+
+# ログ出力先
+LOG_DIR = Path("/var/www/Meta-Project/apps/logs/Blog")
+LOG_FILE: Optional[Path] = None
+LOG_START_TIME: Optional[dt.datetime] = None
+
+# インデックスとして扱う拡張子
+INDEX_EXTS = {".txt", ".html"}
+
+# 「知識ファイル」として扱う拡張子
+TEXT_EXTS = {".txt", ".md", ".json", ".html", ".rst"}
+
+# 使うモデル名
+MODEL_PHI3 = "phi3:mini"
+MODEL_LLAMA3 = "llama3:8b"
+MODEL_CODEGEMMA = "codegemma:2b"
+
+# キーワード一覧（例）
+KEYWORDS = [
+    "Punk Rock NFT",
+    "Web3 Dystopia（ウェブスリー・ディストピア）",
+    "Crypto Resistance（クリプト・レジスタンス）",
+    "Spy × Punk Girls（スパイ×パンクガールズ）",
+    "Chain of Heresy（異端者たちのチェーン）",
+    "Faith vs. Market（信仰かマーケットか）",
+    "Digital Anarchy（デジタル・アナーキー）",
+    "Post-Dollar World（ポスト・ドル世界）",
+    "Shadow Intelligence（影のインテリジェンス）",
+    "Mental Health × NFT（メンタルヘルスNFT）",
+    "Punk Theology（パンク神学）",
+    "Risk & Redemption（リスクと贖い）",
+    "Cyber Confession（サイバー懺悔室）",
+    "Underground Worship（アンダーグラウンド礼拝）",
+    "Broken Utopia（壊れたユートピア）",
+    "DeFi Church（ディーファイ教会）",
+    "World Bug Hunters（世界のバグハンター）",
+    "Anti-Propaganda Art（アンチプロパガンダ・アート）",
+]
+
+# ====== ログユーティリティ =========================================
 
 
-class BlogRequestHandler(BaseHTTPRequestHandler):
-    server_version = "BlogHTMLServer/1.0"
+def init_logger() -> None:
+    """
+    プロセスごとに別ファイルにログを書き出す。
+    例: blog_20251207-120000_pid12345.log
+    """
+    global LOG_FILE, LOG_START_TIME
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-    def _read_attachment_text(self, path: Path) -> str:
-        """Read a stored attachment as text with a lenient decoder."""
+    LOG_START_TIME = dt.datetime.now()
+    ts = LOG_START_TIME.strftime("%Y%m%d-%H%M%S")
+    pid = os.getpid()
+    LOG_FILE = LOG_DIR / f"blog_{ts}_pid{pid}.log"
+
+
+def log(msg: str) -> None:
+    """
+    標準出力 + ログファイルの両方に書く。
+    """
+    now = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{now}] {msg}"
+
+    # 標準出力
+    print(line, flush=True)
+
+    # ログファイル
+    if LOG_FILE is not None:
         try:
-            return path.read_text(encoding="utf-8")[:MAX_ATTACHMENT_TEXT_CHARS]
-        except UnicodeDecodeError:
-            return path.read_bytes().decode("utf-8", errors="ignore")[:MAX_ATTACHMENT_TEXT_CHARS]
-
-    def _save_attachment(self, field: cgi.FieldStorage) -> tuple[Path, str]:
-        """Persist an uploaded file field and return its path and readable text content."""
-        filename = field.filename or "upload.bin"
-        destination = UPLOAD_DIR / filename
-
-        # FieldStorage keeps the file handle open on .file
-        with destination.open("wb") as f:
-            while True:
-                chunk = field.file.read(READ_CHUNK_SIZE)
-                if not chunk:
-                    break
-                f.write(chunk)
-
-        attachment_text = self._read_attachment_text(destination)
-        return destination, attachment_text
-
-    def _build_prompt_from_multipart(self, form: cgi.FieldStorage) -> tuple[str, list[Path]]:
-        """Compose the prompt including any attachment content from multipart data."""
-        prompt_text = str(form.getfirst("prompt", "")).strip()
-        saved_files: list[Path] = []
-
-        attachments = form.getlist("attachment") if "attachment" in form else []
-        # FieldStorage may return a single item when only one file is uploaded.
-        if isinstance(attachments, cgi.FieldStorage):
-            attachments = [attachments]
-
-        for attachment in attachments:
-            if not isinstance(attachment, cgi.FieldStorage) or not attachment.filename:
-                continue
-            saved_path, attachment_text = self._save_attachment(attachment)
-            saved_files.append(saved_path)
-            attachment_label = f"\n\n[Attachment: {saved_path.name}]\n"
-            prompt_text += attachment_label + attachment_text
-
-        return prompt_text, saved_files
-
-    def _read_body(self) -> dict[str, object]:
-        length = int(self.headers.get("Content-Length", "0"))
-        data = self.rfile.read(length) if length else b""
-        try:
-            return json.loads(data.decode("utf-8")) if data else {}
-        except json.JSONDecodeError:
-            return {}
-
-    def _send_json(self, payload: dict[str, object], status: int = HTTPStatus.OK) -> None:
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    # --------------------------------------------------------------------- #
-    #  POST /api/generate_blog or /api/generate_content_plan
-    # --------------------------------------------------------------------- #
-    def do_POST(self) -> None:  # noqa: N802 (HTTP verb casing)
-        is_blog = self.path == "/api/generate_blog"
-        is_plan = self.path == "/api/generate_content_plan"
-
-        if not (is_blog or is_plan):
-            self._send_json({"ok": False, "error": "not_found"}, status=HTTPStatus.NOT_FOUND)
-            return
-
-        content_type = self.headers.get("Content-Type", "")
-        length = int(self.headers.get("Content-Length", "0"))
-        uploaded_files: list[Path] = []
-        json_body: dict[str, object] | None = None
-
-        # 1) 入力の取り出し（プレーン JSON or multipart/form-data）
-        if content_type.startswith("multipart/form-data"):
-            form = cgi.FieldStorage(
-                fp=io.BytesIO(self.rfile.read(length)),
-                headers=self.headers,
-                environ={
-                    "REQUEST_METHOD": "POST",
-                    "CONTENT_TYPE": content_type,
-                },
-            )
-            prompt_text, uploaded_files = self._build_prompt_from_multipart(form)
-        else:
-            json_body = self._read_body()
-            prompt_text = str(json_body.get("prompt", "")).strip() if isinstance(json_body, dict) else ""
-
-        if not prompt_text:
-            self._send_json({"ok": False, "error": "prompt_missing"}, status=HTTPStatus.BAD_REQUEST)
-            return
-
-        model = cir.DEFAULT_MODEL
-        provider = cir.DEFAULT_PROVIDER
-        api_base = cir.DEFAULT_API_BASE
-        filename = None
-        if isinstance(json_body, dict):
-            model = str(json_body.get("model", model))
-            provider = str(json_body.get("provider", provider))
-            api_base = str(json_body.get("api_base", api_base))
-            filename = str(json_body.get("filename")) if json_body.get("filename") else None
-
-        try:
-            result = cir.respond_to_instruction(
-                prompt_text,
-                model=model,
-                provider=provider,
-                api_base=api_base,
-                filename=filename,
-            )
-        except ValueError as exc:
-            self._send_json(
-                {"ok": False, "error": f"invalid_request: {exc}"},
-                status=HTTPStatus.BAD_REQUEST,
-            )
-            return
-        except Exception as exc:  # pragma: no cover - runtime specific
-            self._send_json(
-                {"ok": False, "error": f"execution_failed: {exc}"},
-                status=HTTPStatus.INTERNAL_SERVER_ERROR,
-            )
-            return
-
-        payload = {
-            "ok": bool(result.get("ok", False)),
-            "html": result.get("html"),
-            "filename": result.get("filename"),
-            "path": result.get("path"),
-            "model": result.get("model"),
-            "provider": result.get("provider"),
-            "error": result.get("error"),
-            "uploaded_files": [path.name for path in uploaded_files],
-        }
-        self._send_json(payload, status=HTTPStatus.OK)
+            with LOG_FILE.open("a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except Exception:
+            # ログ書き込み失敗で本体を落とさない
+            pass
 
 
-    # --------------------------------------------------------------------- #
-    #  GET /api/status
-    # --------------------------------------------------------------------- #
-    def do_GET(self) -> None:  # noqa: N802 (HTTP verb casing)
-        if self.path != "/api/status":
-            self._send_json({"ok": False, "error": "not_found"}, status=HTTPStatus.NOT_FOUND)
-            return
-
-        self._send_json({"ok": True, "updates": []})
+# ====== 共通ユーティリティ =========================================
 
 
-def run(host: str = "0.0.0.0", port: int = 8000) -> None:
-    server = HTTPServer((host, port), BlogRequestHandler)
-    print(
-        "Serving client instruction responder on "
-        f"http://{host}:{port}/api/generate_blog"
-    )
+def call_ollama_generate(model: str, prompt: str, temperature: float = 0.4) -> str:
+    """
+    Ollama /api/generate を叩いて単発プロンプトを投げる。
+    重い処理なのでタイムアウトは 900 秒に設定。
+    """
+    url = f"{OLLAMA_BASE}/api/generate"
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "stream": False,
+        "options": {"temperature": temperature},
+    }
+    data = json.dumps(payload).encode("utf-8")
+    req = Request(url, data=data, headers={"Content-Type": "application/json"})
+
     try:
-        server.serve_forever()
-    finally:
-        server.server_close()
+        with urlopen(req, timeout=1200) as resp:
+            body = resp.read().decode("utf-8")
+        res = json.loads(body)
+        return res.get("response", "").strip()
+
+    except (TimeoutError, socket.timeout) as e:
+        log(f"ERROR: Ollama request TIMEOUT for model={model}: {e}")
+        return ""
+
+    except (URLError, HTTPError) as e:
+        log(f"ERROR: Ollama request failed for model={model}: {e}")
+        return ""
+
+    except json.JSONDecodeError:
+        log("ERROR: Failed to decode Ollama response JSON")
+        return ""
+
+
+def extract_json_block(text: str) -> Optional[Dict[str, Any]]:
+    """
+    モデルから返ってきたテキストから JSON ブロックだけを抜き出す。
+    最初の '{' から最後の '}' までを JSON とみなす簡易版。
+    """
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    snippet = text[start : end + 1]
+    try:
+        return json.loads(snippet)
+    except json.JSONDecodeError:
+        return None
+
+
+def extract_json_list(text: str) -> Optional[List[Dict[str, Any]]]:
+    """
+    JSON の配列 (list) を抜き出す版。
+    """
+    start = text.find("[")
+    end = text.rfind("]")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    snippet = text[start : end + 1]
+    try:
+        data = json.loads(snippet)
+        if isinstance(data, list):
+            return data  # type: ignore[return-value]
+    except json.JSONDecodeError:
+        return None
+    return None
+
+
+def read_text(path: Path, max_chars: int | None = None) -> str:
+    """
+    テキストファイルを読み込む。JSONでもそのまま文字列として扱う。
+    """
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except FileNotFoundError:
+        return ""
+    if max_chars is not None:
+        return text[:max_chars]
+    return text
+
+
+def slugify(value: str) -> str:
+    """
+    ファイル名用の簡易スラッグ。
+    """
+    value = value.strip().lower()
+    value = re.sub(r"[^\w]+", "-", value)
+    value = re.sub(r"-{2,}", "-", value)
+    return value.strip("-") or "article"
+
+
+def translate_text(text: str, target_lang: str) -> str:
+    """
+    日本語テキストを target_lang (English / Italian) に翻訳する。
+    翻訳は llama3:8b を使用。
+    """
+    if not text.strip():
+        return text
+    prompt = textwrap.dedent(
+        f"""
+        You are a professional translator.
+        The source text is Japanese. Translate it into natural {target_lang}.
+        - Preserve the meaning and nuance.
+        - Use fluent, publication-quality {target_lang}.
+        - Do NOT explain, do NOT repeat the Japanese.
+        - Output ONLY the translated text.
+
+        ----
+        {text}
+        ----
+        """
+    )
+    return call_ollama_generate(MODEL_LLAMA3, prompt)
+
+
+# ====== ステップ 1: キーワード & インデックス選択 ===================
+
+
+def find_index_files(root: Path) -> List[Path]:
+    files: List[Path] = []
+    if not root.exists():
+        return files
+    for p in root.rglob("*"):
+        if p.is_file() and p.suffix.lower() in INDEX_EXTS:
+            files.append(p)
+    return files
+
+
+def choose_index_with_phi3(keyword: str, files: List[Path]) -> Optional[Path]:
+    """
+    複数のインデックス候補から、phi3:mini に 1 つ選ばせる。
+    """
+    if not files:
+        return None
+
+    entries: List[str] = []
+    for i, path in enumerate(files):
+        snippet = read_text(path, max_chars=800)
+        rel = path.relative_to(INDEX_ROOT)
+        entries.append(
+            f"[{i}] {rel}\n"
+            f"---------\n"
+            f"{snippet}\n"
+        )
+
+    joined = "\n\n".join(entries)
+
+    prompt = textwrap.dedent(
+        f"""
+        あなたはインデックスファイルの選定アシスタントです。
+        テーマ:「{keyword}」
+
+        以下に、複数のインデックスファイルの候補が番号付きで並んでいます。
+        テーマに最も関連が深そうなものを 1 つだけ選んでください。
+
+        出力フォーマット:
+        - 選んだ番号だけを半角数字で1つだけ出力してください。
+        - 説明や他の文字は一切書かないでください。
+
+        候補一覧:
+        {joined}
+        """
+    )
+    res = call_ollama_generate(MODEL_PHI3, prompt)
+    m = re.search(r"\d+", res)
+    if not m:
+        log("WARN: phi3 から選択番号が取得できなかったため、先頭ファイルを採用します。")
+        return files[0]
+    idx = int(m.group(0))
+    if idx < 0 or idx >= len(files):
+        log("WARN: phi3 が範囲外の番号を返したため、先頭ファイルを採用します。")
+        return files[0]
+    return files[idx]
+
+
+# ====== ステップ 2: メタ情報 (タイトル/説明/タグ/概要) ================
+
+
+def generate_metadata_with_phi3(keyword: str, index_text: str) -> Dict[str, Any]:
+    """
+    phi3:mini にメタ情報を JSON で作らせる（すべて日本語）。
+    """
+    prompt = textwrap.dedent(
+        f"""
+        あなたは「哲学者気取りのヨハネ」というペルソナに向けた
+        日本語ブログの編集者です。
+        テーマは「{keyword}」です。
+
+        以下のインデックス内容をよく読み、このテーマに沿ったブログ記事の
+        メタ情報を**すべて日本語**で作成してください。
+
+        <INDEX>
+        {index_text}
+        </INDEX>
+
+        必ず次の形式の JSON だけを出力してください。
+        キーも値も日本語で書き、英語文は使わないでください。
+
+        {{
+          "title": "ペルソナに刺さるタイトル。日本語で50文字以内",
+          "description": "約200文字のディスクリプション。日本語で記事の魅力が伝わるように書く。",
+          "tags": ["タグ1", "タグ2", "タグ3", "タグ4", "タグ5", "タグ6"],
+          "overview": "記事全体の内容をまとめた概要。約500文字。日本語のみで書く。"
+        }}
+        """
+    )
+    res = call_ollama_generate(MODEL_PHI3, prompt)
+    meta = extract_json_block(res) or {}
+    return meta
+
+
+# ====== ステップ 3: 7 セクション構成 ================================
+
+
+def generate_sections_with_phi3(keyword: str, overview: str) -> List[Dict[str, str]]:
+    """
+    日本語の概要から 7 つのセクション（タイトル＋要約）を日本語で作る。
+
+    ポイント:
+    - LLM が返す "title" は信用せず、summary と keyword からこちらでタイトルを決め直す。
+    - 汎用的な「セクション1」「第1節」などは使わない。
+    """
+
+    # 1) まずは LLM に「summary 付きのセクション案」を考えさせる
+    prompt = textwrap.dedent(
+        f"""
+        あなたは長文ブログの構成作家です。
+        テーマ「{keyword}」の記事について、以下の概要を元に
+        7つのセクション構成を**日本語**で考えてください。
+
+        概要（日本語）:
+        {overview}
+
+        各セクションについて、次の情報を用意してください:
+        - "title": いったん仮のタイトルで構いません（後で機械的に書き換えます）
+        - "summary": セクションで展開する内容の説明
+                     （2〜3文、合計で約150文字、日本語）
+
+        次の形式の JSON 配列だけを出力してください:
+        （JSON 以外の文字は出力しない）
+
+        [
+          {{"title": "仮タイトル1", "summary": "説明文..." }},
+          ...  // 合計7つ
+        ]
+        """
+    )
+
+    res = call_ollama_generate(MODEL_PHI3, prompt)
+    sections = extract_json_list(res) or []
+
+    cleaned: List[Dict[str, str]] = []
+
+    def make_label_from_summary(summary: str, idx: int, keyword: str) -> str:
+        """
+        summary から見出し用の短いラベルを作る。
+        - 最初の文（「。」まで）を見出し候補にする
+        - 長すぎたら 24 文字で切る
+        - 何もなければ keyword を使ったテンプレートから決める
+        """
+
+        s = (summary or "").strip()
+        if s:
+            # 「。」or「．」で最初の文だけ取る
+            first = re.split(r"[。．]", s, maxsplit=1)[0].strip()
+            base = first or s
+            if len(base) > 24:
+                base = base[:24] + "…"
+            # 「第1節」「セクション1」みたいなゴミタイトルなら捨てる
+            if not re.fullmatch(r"(第?\d+節?|セクション\d+)", base):
+                return base
+
+        # ---- ここからフォールバック（summary が空・微妙なとき）----
+
+        # keyword が「Faith vs. Market（信仰かマーケットか）」みたいな形の場合、
+        # カッコ内の日本語だけ抜く。それもなければ keyword そのものを使う。
+        m = re.search(r"（(.+?)）", keyword)
+        base_kw = m.group(1) if m else keyword
+
+        patterns = [
+            "{}とは何かを整理する",
+            "{}の歴史的背景",
+            "{}と日常生活のあいだ",
+            "{}とテクノロジー／ネット社会",
+            "{}が孕むリスクと矛盾",
+            "{}との付き合い方と実践",
+            "これからの{}と私たち",
+        ]
+        idx0 = min(max(idx - 1, 0), len(patterns) - 1)
+        return patterns[idx0].format(base_kw)
+
+    # 7 セクション分きっちり作る
+    for i in range(7):
+        if i < len(sections):
+            sec = sections[i]
+            summary = str(sec.get("summary") or "")
+        else:
+            summary = ""
+
+        title = make_label_from_summary(summary, i + 1, keyword)
+        cleaned.append({"title": title, "summary": summary})
+
+    return cleaned
+
+
+
+
+# ====== ステップ 4: 各セクション本文 ================================
+
+
+def collect_knowledge_text(chosen_index: Path, max_chars: int = 8000) -> str:
+    """
+    インデックスファイルと、その周辺の知識ファイルを連結して
+    LLM に渡すコンテキストテキストを作る。
+    """
+    chunks: List[str] = []
+
+    # インデックス自体
+    chunks.append(f"[INDEX] {chosen_index}\n")
+    chunks.append(read_text(chosen_index, max_chars=2000))
+
+    # インデックスと同じディレクトリ配下のファイルを軽く参照
+    for p in chosen_index.parent.rglob("*"):
+        if not p.is_file():
+            continue
+        if p == chosen_index:
+            continue
+        if p.suffix.lower() not in TEXT_EXTS:
+            continue
+        chunks.append(f"\n[FILE] {p}\n")
+        chunks.append(read_text(p, max_chars=800))
+        if sum(len(c) for c in chunks) > max_chars:
+            break
+
+    text = "\n".join(chunks)
+    return text[:max_chars]
+
+
+def write_section_body_with_llama3(
+    keyword: str,
+    persona: str,
+    section: Dict[str, str],
+    index_text: str,
+    knowledge_text: str,
+) -> str:
+    """
+    llama3:8b に1セクション分の約1500字の本文を書かせる（日本語のみ）。
+    """
+    prompt = textwrap.dedent(
+        f"""
+        あなたは日本語で文章を書く哲学系ブロガーです。
+        ペルソナ: {persona}
+        設定: パンクロック、NFT、Web3、暗号通貨、信仰と市場の葛藤などを
+        テーマにしつつ、批評的かつ文学的な文体で論じます。
+        宣伝や特定サービスのPRは絶対に行わないでください。
+
+        記事の大テーマ: {keyword}
+
+        セクション情報（日本語）:
+        タイトル: {section.get("title")}
+        セクション概要:
+        {section.get("summary")}
+
+        インデックスファイルからの情報（原文は英語など混在可）:
+        {index_text}
+
+        知識ファイルからの抜粋:
+        {knowledge_text}
+
+        上記をすべて踏まえて、このセクションの本文を**日本語だけで**
+        約1500文字の論文風に執筆してください。
+
+        条件:
+        - 出力はすべて自然な日本語で書くこと（英語の文を混在させない）
+        - セクションのタイトルと概要に沿った内容にすること
+        - 同じ文章の繰り返しは避けること
+        - 特定の企業・取引所・コイン等の宣伝は一切しないこと
+        - 読者に思考を促すような哲学的な語り口にすること
+        """
+    )
+    return call_ollama_generate(MODEL_LLAMA3, prompt)
+
+
+# ====== 図解 HTML（英語タイトル＋英語本文ベース） ====================
+
+
+def write_section_html_with_codegemma(
+    section_title_en: str,
+    section_body_en: str,
+) -> str:
+    """
+    codegemma:2b に、セクション内容を可視化する
+    リッチな HTML (JS + CSS 込み) を作らせる。
+
+    図解内のテキスト（タイトル・ラベル等）はすべて英語に統一する。
+    """
+    prompt = textwrap.dedent(
+        f"""
+        You are a front-end engineer and data-visualization designer.
+        Based on the following ENGLISH section of an article, create ONE rich,
+        self-contained HTML snippet that visually explains the core ideas.
+
+        IMPORTANT LANGUAGE RULES:
+        - All text INSIDE the diagram (titles, labels, legends, tooltips, etc.)
+          MUST be in English.
+        - Do NOT output any Japanese in the diagram.
+
+        VISUAL REQUIREMENTS:
+        - Do NOT just output a simple <ul> with bullet points.
+        - Use a combination of semantic HTML + CSS + vanilla JavaScript.
+        - Include inline <style> and <script>.
+        - Implement at least ONE interactive or animated behavior, for example:
+          * hover highlight of nodes,
+          * click to toggle details,
+          * step-by-step reveal,
+          * animated progress bar,
+          * simple chart that updates on click.
+        - Use a responsive layout with flexbox or CSS grid.
+
+        DIAGRAM PATTERNS (pick ONE that fits best):
+        - Article roadmap / progress tracker (Sections 1–7)
+        - Concept map / mind map
+        - Flowchart or step-by-step process
+        - Simple architecture / system diagram
+        - Comparison table styled with CSS
+        - Simple chart using <svg> (line / bar / pie)
+        - Risk matrix (probability × impact)
+        - Persona / use-case card layout
+        - Summary board of 3–5 key points
+
+        HTML CONSTRAINTS:
+        - The snippet will be injected inside:
+              <div class="section-visual"> ... </div>
+          so DO NOT include <html>, <head>, or <body> tags.
+        - Start with:
+              <section class="auto-visual">
+                <h3>{section_title_en} – [short diagram name]</h3>
+                ...
+              </section>
+        - Use only inline CSS (<style>) and inline JS (<script>).
+        - Do NOT load external libraries (no CDN, no frameworks).
+
+        SECTION TITLE (English):
+        {section_title_en}
+
+        SECTION BODY (English):
+        {section_body_en}
+
+        Output ONLY the HTML snippet, with no explanation and no backticks.
+        """
+    )
+    return call_ollama_generate(MODEL_CODEGEMMA, prompt)
+
+
+# ====== ステップ 5: 総論 ============================================
+
+
+def write_conclusion_with_llama3(
+    keyword: str,
+    persona: str,
+    overview: str,
+    all_section_bodies: List[str],
+) -> str:
+    """
+    日本語で総論を書く。本文もすべて日本語。
+    """
+    joined = "\n\n".join(all_section_bodies)
+    prompt = textwrap.dedent(
+        f"""
+        あなたは日本語で文章を書く哲学系ブロガーです。
+        ペルソナ: {persona}
+        大テーマ: {keyword}
+
+        記事の概要（日本語）:
+        {overview}
+
+        以下に、すでに執筆済みの各セクション本文があります（日本語）。
+        ----
+        {joined}
+        ----
+
+        これら全体を踏まえた「総論」を日本語で約1500文字書いてください。
+
+        条件:
+        - 各セクションの内容を踏まえて、全体の問題意識とメッセージを総括する
+        - 読者に静かな余韻と問いを残す締めくくりにする
+        - 特定のサービスや商品の宣伝は一切しない
+        - 同一文章の繰り返しは避ける
+        - 出力はすべて自然な日本語だけで書く（英語文を混在させない）
+        """
+    )
+    return call_ollama_generate(MODEL_LLAMA3, prompt)
+
+
+# ====== HTML 出力 ====================================================
+
+
+def build_html_document(
+    lang: str,
+    meta: Dict[str, Any],
+    sections: List[Dict[str, Any]],
+    section_bodies: List[str],
+    section_htmls: List[str],
+    conclusion: str,
+) -> str:
+    """
+    1言語分の HTML を組み立てる。
+    section_htmls は英語で書かれた図解 HTML を想定（3言語共通）。
+    """
+    title = str(meta.get("title") or "自動生成記事")
+    description = str(meta.get("description") or "")
+    tags = meta.get("tags") or []
+    overview = str(meta.get("overview") or "")
+
+    tags_line = ", ".join(str(t) for t in tags)
+
+    # 見出しのラベル
+    if lang == "en":
+        overview_heading = "Overview"
+        conclusion_heading = "Conclusion"
+    elif lang == "it":
+        overview_heading = "Panoramica"
+        conclusion_heading = "Conclusione"
+    else:
+        # 日本語では「概要」という見出しは使わない
+        overview_heading = "イントロダクション"
+        conclusion_heading = "総論"
+
+    parts: List[str] = []
+    parts.append("<!DOCTYPE html>")
+    parts.append(f'<html lang="{lang}">')
+    parts.append("<head>")
+    parts.append('<meta charset="UTF-8" />')
+    parts.append(f"<title>{title}</title>")
+    parts.append(f'<meta name="description" content="{description}">')
+    parts.append("</head>")
+    parts.append("<body>")
+    parts.append("<article>")
+    parts.append("<header>")
+    parts.append(f"<h1>{title}</h1>")
+    if tags_line:
+        parts.append(f"<p><strong>Tags:</strong> {tags_line}</p>")
+    parts.append(f"<p>{description}</p>")
+    parts.append("</header>")
+
+    # Overview
+    parts.append("<section>")
+    parts.append(f"<h2>{overview_heading}</h2>")
+    for paragraph in overview.splitlines():
+        paragraph = paragraph.strip()
+        if paragraph:
+            parts.append(f"<p>{paragraph}</p>")
+    parts.append("</section>")
+
+    # Sections
+    for i, sec in enumerate(sections):
+        body = section_bodies[i] if i < len(section_bodies) else ""
+        html_snippet = section_htmls[i] if i < len(section_htmls) else ""
+        parts.append("<section>")
+        parts.append(f"<h2>{sec.get('title')}</h2>")
+        if sec.get("summary"):
+            parts.append(f"<p><em>{sec.get('summary')}</em></p>")
+        parts.append('<div class="section-body">')
+        for paragraph in body.splitlines():
+            paragraph = paragraph.strip()
+            if paragraph:
+                parts.append(f"<p>{paragraph}</p>")
+        parts.append("</div>")
+        if html_snippet.strip():
+            parts.append('<div class="section-visual">')
+            parts.append(html_snippet)
+            parts.append("</div>")
+        parts.append("</section>")
+
+    # Conclusion
+    parts.append("<section>")
+    parts.append(f"<h2>{conclusion_heading}</h2>")
+    for paragraph in conclusion.splitlines():
+        paragraph = paragraph.strip()
+        if paragraph:
+            parts.append(f"<p>{paragraph}</p>")
+    parts.append("</section>")
+
+    parts.append("</article>")
+    parts.append("</body>")
+    parts.append("</html>")
+
+    return "\n".join(parts)
+
+
+# ====== メイン処理 ====================================================
+
+
+def main() -> None:
+    global LOG_START_TIME
+
+    # ロガー初期化（ここでファイルが作成される）
+    init_logger()
+    log("=== Blog generator started ===")
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    persona = "哲学者気取りのヨハネ"
+
+    # 1) キーワードをランダムに選択
+    keyword = random.choice(KEYWORDS)
+    log(f"Selected keyword: {keyword}")
+
+    # 2) インデックスファイル一覧を取得し、phi3 で1つ選ぶ
+    index_files = find_index_files(INDEX_ROOT)
+    if not index_files:
+        log(f"ERROR: No index files found under {INDEX_ROOT}")
+        return
+
+    chosen_index = choose_index_with_phi3(keyword, index_files)
+    if not chosen_index:
+        log("ERROR: Failed to choose index file.")
+        return
+
+    log(f"Chosen index file: {chosen_index}")
+    index_text_full = read_text(chosen_index, max_chars=4000)
+    knowledge_text = collect_knowledge_text(chosen_index, max_chars=8000)
+
+    # 3) メタ情報を phi3 で生成（日本語）
+    log("Generating Japanese metadata with phi3...")
+    meta_ja = generate_metadata_with_phi3(keyword, index_text_full)
+    if not meta_ja.get("title"):
+        log("WARN: metadata title is empty; using keyword as fallback title.")
+        meta_ja["title"] = keyword
+    log(f"Metadata generated (JA): title={meta_ja.get('title')}")
+
+    overview_ja = str(meta_ja.get("overview") or "")
+    if not overview_ja:
+        log("WARN: overview is empty, using index snippet as fallback.")
+        overview_ja = index_text_full[:800]
+        meta_ja["overview"] = overview_ja
+
+    # 4) 7セクション構成を phi3 で生成（日本語）
+    log("Generating 7 Japanese sections with phi3...")
+    sections_ja = generate_sections_with_phi3(keyword, overview_ja)
+    log(f"Generated {len(sections_ja)} sections (JA)")
+
+    # 5) 各セクション本文を生成（日本語）
+    section_bodies_ja: List[str] = []
+    for i, sec in enumerate(sections_ja):
+        log(f"Generating JA body for section {i+1}: {sec.get('title')}")
+        body = write_section_body_with_llama3(
+            keyword=keyword,
+            persona=persona,
+            section=sec,
+            index_text=index_text_full,
+            knowledge_text=knowledge_text,
+        )
+        section_bodies_ja.append(body)
+
+    # 6) 総論を生成（日本語）
+    log("Generating JA conclusion...")
+    conclusion_ja = write_conclusion_with_llama3(
+        keyword=keyword,
+        persona=persona,
+        overview=overview_ja,
+        all_section_bodies=section_bodies_ja,
+    )
+
+    # 7) 多言語版に翻訳（すべて llama3:8b）
+    log("Translating metadata and bodies into English...")
+    meta_en = {
+        "title": translate_text(str(meta_ja.get("title") or ""), "English"),
+        "description": translate_text(str(meta_ja.get("description") or ""), "English"),
+        "tags": [translate_text(str(t), "English") for t in (meta_ja.get("tags") or [])],
+        "overview": translate_text(overview_ja, "English"),
+    }
+    sections_en: List[Dict[str, Any]] = []
+    for sec in sections_ja:
+        sections_en.append(
+            {
+                "title": translate_text(sec.get("title", ""), "English"),
+                "summary": translate_text(sec.get("summary", ""), "English"),
+            }
+        )
+    section_bodies_en = [translate_text(b, "English") for b in section_bodies_ja]
+    conclusion_en = translate_text(conclusion_ja, "English")
+
+    log("Translating metadata and bodies into Italian...")
+    meta_it = {
+        "title": translate_text(str(meta_ja.get("title") or ""), "Italian"),
+        "description": translate_text(str(meta_ja.get("description") or ""), "Italian"),
+        "tags": [translate_text(str(t), "Italian") for t in (meta_ja.get("tags") or [])],
+        "overview": translate_text(overview_ja, "Italian"),
+    }
+    sections_it: List[Dict[str, Any]] = []
+    for sec in sections_ja:
+        sections_it.append(
+            {
+                "title": translate_text(sec.get("title", ""), "Italian"),
+                "summary": translate_text(sec.get("summary", ""), "Italian"),
+            }
+        )
+    section_bodies_it = [translate_text(b, "Italian") for b in section_bodies_ja]
+    conclusion_it = translate_text(conclusion_ja, "Italian")
+
+    # 8) 図解 HTML を英語テキストから生成（3言語共通）
+    log("Generating section visuals (HTML) from English sections...")
+    section_htmls: List[str] = []
+    for i, sec_en in enumerate(sections_en):
+        title_en = str(sec_en.get("title") or f"Section {i+1}")
+        body_en = section_bodies_en[i] if i < len(section_bodies_en) else ""
+        log(f"Generating HTML visual for section {i+1}: {title_en}")
+        html_snippet = write_section_html_with_codegemma(
+            section_title_en=title_en,
+            section_body_en=body_en,
+        )
+        section_htmls.append(html_snippet)
+
+    # 9) HTML とメタ情報を保存
+    now = dt.datetime.now()
+    timestamp = now.strftime("%Y%m%d-%H%M%S")
+    slug = slugify(keyword)
+
+    html_ja_path = OUTPUT_DIR / f"{timestamp}_{slug}_ja.html"
+    html_en_path = OUTPUT_DIR / f"{timestamp}_{slug}_en.html"
+    html_it_path = OUTPUT_DIR / f"{timestamp}_{slug}_it.html"
+    json_path = OUTPUT_DIR / f"{timestamp}_{slug}_meta.json"
+
+    log(f"Saving HTML files and metadata to {OUTPUT_DIR} ...")
+
+    html_ja = build_html_document(
+        lang="ja",
+        meta=meta_ja,
+        sections=sections_ja,
+        section_bodies=section_bodies_ja,
+        section_htmls=section_htmls,
+        conclusion=conclusion_ja,
+    )
+    html_en = build_html_document(
+        lang="en",
+        meta=meta_en,
+        sections=sections_en,
+        section_bodies=section_bodies_en,
+        section_htmls=section_htmls,  # 図解は英語のまま共通
+        conclusion=conclusion_en,
+    )
+    html_it = build_html_document(
+        lang="it",
+        meta=meta_it,
+        sections=sections_it,
+        section_bodies=section_bodies_it,
+        section_htmls=section_htmls,
+        conclusion=conclusion_it,
+    )
+
+    html_ja_path.write_text(html_ja, encoding="utf-8")
+    html_en_path.write_text(html_en, encoding="utf-8")
+    html_it_path.write_text(html_it, encoding="utf-8")
+
+    meta_out: Dict[str, Any] = {
+        "generated_at": now.isoformat(),
+        "keyword": keyword,
+        "index_file": str(chosen_index),
+        "meta_ja": meta_ja,
+        "meta_en": meta_en,
+        "meta_it": meta_it,
+        "sections_ja": sections_ja,
+    }
+    json_path.write_text(
+        json.dumps(meta_out, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+    log(f"Saved HTML (JA): {html_ja_path}")
+    log(f"Saved HTML (EN): {html_en_path}")
+    log(f"Saved HTML (IT): {html_it_path}")
+    log(f"Saved JSON meta: {json_path}")
+
+    # 経過時間ログ
+    if LOG_START_TIME is not None:
+        elapsed = dt.datetime.now() - LOG_START_TIME
+        minutes = elapsed.total_seconds() / 60.0
+        log(f"=== Blog generator finished. Elapsed: {minutes:.1f} minutes ===")
 
 
 if __name__ == "__main__":
-    run()
+    main()
