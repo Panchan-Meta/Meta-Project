@@ -483,6 +483,8 @@ def write_section_body_with_llama3(
     keyword: str,
     persona: str,
     section: Dict[str, str],
+    article_title: str,
+    overview: str,
     index_text: str,
     knowledge_text: str,
 ) -> str:
@@ -497,7 +499,10 @@ def write_section_body_with_llama3(
         テーマにしつつ、批評的かつ文学的な文体で論じます。
         宣伝や特定サービスのPRは絶対に行わないでください。
 
+        記事のタイトル: {article_title}
         記事の大テーマ: {keyword}
+        記事全体の概要:
+        {overview}
 
         セクション情報（日本語）:
         タイトル: {section.get("title")}
@@ -971,6 +976,8 @@ def main() -> None:
             keyword=keyword,
             persona=persona,
             section=sec,
+            article_title=str(meta_ja.get("title") or keyword),
+            overview=overview_ja,
             index_text=index_text_full,
             knowledge_text=knowledge_text,
         )
