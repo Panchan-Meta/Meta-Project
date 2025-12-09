@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+from html.parser import HTMLParser
 import os
 import random
 import re
@@ -41,6 +42,7 @@ import textwrap
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.error import HTTPError, URLError
+from urllib.parse import urljoin
 from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -137,6 +139,8 @@ KEYWORDS = [
     "Anxious Hodler’s Club（不安なホドラーズクラブ）",
     "Broken World, Cute Girls（壊れた世界とかわいい少女たち）",
 ]
+
+RAHAB_CATEGORY_URL = "https://rahabpunkaholicgirls.com/category/stories-en/nft-music-en/"
 
 # ====== ログユーティリティ =========================================
 
@@ -246,6 +250,21 @@ def extract_json_list(text: str) -> Optional[List[Dict[str, Any]]]:
     return None
 
 
+def tokenize_keyword(keyword: str) -> List[str]:
+    """Split keywords into searchable chunks.
+
+    The splitter is intentionally simple so that unit tests remain deterministic
+    while still covering cases like "Underdog Intelligence Network（負け犬インテリジェンス網）".
+    """
+
+    tokens: List[str] = []
+    for raw in re.split(r"[\s、,，。・（）()\[\]{}<>《》/\\|]+", keyword):
+        token = raw.strip()
+        if token:
+            tokens.append(token)
+    return tokens
+
+
 def read_text(path: Path, max_chars: int | None = None) -> str:
     """
     テキストファイルを読み込む。JSONでもそのまま文字列として扱う。
@@ -320,11 +339,90 @@ def search_indexes(keyword: str, files: List[Path]) -> List[Path]:
 
     query = generate_search_query(keyword)
     lowered_query = query.lower()
+    lowered_keyword = keyword.strip().lower()
     for path in files:
         text = read_text(path, max_chars=2000).lower()
-        if lowered_query and lowered_query in text:
+        if (lowered_keyword and lowered_keyword in text) or (
+            lowered_query and lowered_query in text
+        ):
             hits.append(path)
     return hits
+
+
+def search_indexes_by_parts(keyword: str, files: List[Path]) -> List[Path]:
+    """Try each keyword fragment until we collect hits."""
+
+    seen = set()
+    hits: List[Path] = []
+    for token in tokenize_keyword(keyword):
+        for path in search_indexes(token, files):
+            if path not in seen:
+                hits.append(path)
+                seen.add(path)
+    return hits
+
+
+def parse_related_terms(text: str) -> List[str]:
+    """Parse llama/phi suggestions into a clean term list."""
+
+    terms: List[str] = []
+    if not text.strip():
+        return terms
+
+    for line in re.split(r"[\n,]", text):
+        term = line.strip(" -•・\t")
+        if term:
+            terms.append(term)
+    return terms
+
+
+def suggest_related_terms_with_llm(keyword: str, limit: int = 3) -> List[str]:
+    prompt = textwrap.dedent(
+        f"""
+        あなたは関連語を提案するアシスタントです。
+        次のキーワードを検索するために、意味が近い語を{limit}個以内で提案してください。
+        - 返答は日本語・英語の混在可。
+        - 一行ごとに1単語/フレーズだけを書き、説明は不要です。
+        - 略語ではなく、検索に使える語を返してください。
+
+        キーワード: {keyword}
+        """
+    )
+
+    raw = call_ollama_generate(MODEL_PHI3, prompt)
+    terms = parse_related_terms(raw)[:limit]
+    log(f"Related term suggestions: {terms}")
+    return terms
+
+
+def search_indexes_for_terms(terms: List[str], files: List[Path]) -> List[Path]:
+    seen = set()
+    hits: List[Path] = []
+    for term in terms:
+        for path in search_indexes(term, files):
+            if path not in seen:
+                hits.append(path)
+                seen.add(path)
+    return hits
+
+
+def locate_relevant_indexes(keyword: str, index_files: List[Path]) -> List[Path]:
+    matched_indexes = search_indexes(keyword, index_files)
+    if matched_indexes:
+        return matched_indexes
+
+    log("No search hits found. Trying keyword fragments...")
+    matched_indexes = search_indexes_by_parts(keyword, index_files)
+    if matched_indexes:
+        return matched_indexes
+
+    log("No fragment hits. Asking LLM for related terms...")
+    related_terms = suggest_related_terms_with_llm(keyword)
+    if not related_terms:
+        return []
+
+    matched_indexes = search_indexes_for_terms(related_terms, index_files)
+    return matched_indexes
 
 
 def choose_index_with_phi3(keyword: str, files: List[Path]) -> Optional[Path]:
@@ -377,7 +475,9 @@ def choose_index_with_phi3(keyword: str, files: List[Path]) -> Optional[Path]:
 # ====== ステップ 2: メタ情報 (タイトル/説明/タグ/概要) ================
 
 
-def generate_metadata_with_phi3(keyword: str, index_text: str) -> Dict[str, Any]:
+def generate_metadata_with_phi3(
+    keyword: str, index_text: str, rahab_context: str = ""
+) -> Dict[str, Any]:
     """
     phi3:mini にメタ情報を JSON で作らせる（すべて日本語）。
     """
@@ -389,7 +489,8 @@ def generate_metadata_with_phi3(keyword: str, index_text: str) -> Dict[str, Any]
         ペルソナ特徴: 静かな考察を好み、批判的だが希望も探る。
         トーン: シリアスだが読者に寄り添う穏やかな口調。
 
-        以下のインデックス内容をよく読み、このテーマに沿ったブログ記事の
+        以下のインデックス内容と Rahab Punkaholic Girls の曲リストを読み、
+        このテーマに沿ったブログ記事の
         メタ情報を**すべて日本語**で作成してください。
         インデックスに書かれていない事実は絶対に補わず、推測で埋めないでください。
         わからない場合は「情報が不足している」と簡潔に書いてください。
@@ -397,6 +498,10 @@ def generate_metadata_with_phi3(keyword: str, index_text: str) -> Dict[str, Any]
         <INDEX>
         {index_text}
         </INDEX>
+
+        <RAHAB_TRACKS>
+        {rahab_context}
+        </RAHAB_TRACKS>
 
         必ず次の形式の JSON だけを出力してください。
         キーも値も日本語で書き、英語文は使わないでください。
@@ -417,7 +522,9 @@ def generate_metadata_with_phi3(keyword: str, index_text: str) -> Dict[str, Any]
 # ====== ステップ 3: 7 セクション構成 ================================
 
 
-def generate_sections_with_phi3(keyword: str, overview: str) -> List[Dict[str, str]]:
+def generate_sections_with_phi3(
+    keyword: str, overview: str, rahab_context: str = ""
+) -> List[Dict[str, str]]:
     """
     日本語の概要から 7 つのセクション（タイトル＋要約）を日本語で作る。
 
@@ -436,6 +543,9 @@ def generate_sections_with_phi3(keyword: str, overview: str) -> List[Dict[str, s
 
         概要（日本語）:
         {overview}
+
+        Rahab Punkaholic Girls の曲が持つ世界観と主張:
+        {rahab_context}
 
         各セクションについて、次の情報を用意してください:
         - "title": いったん仮のタイトルで構いません（後で機械的に書き換えます）
@@ -542,6 +652,90 @@ def collect_knowledge_text(chosen_index: Path, max_chars: int = 8000) -> str:
     return text[:max_chars]
 
 
+def parse_rahab_tracks(html: str) -> List[str]:
+    class TrackParser(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__()
+            self.capture = False
+            self.buffer: List[str] = []
+            self.tracks: List[str] = []
+
+        def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+            if tag.lower() != "a":
+                return
+            href = dict(attrs).get("href", "")
+            if "stories-en/nft-music-en" in href:
+                self.capture = True
+                self.buffer = []
+
+        def handle_data(self, data: str) -> None:
+            if self.capture:
+                self.buffer.append(data)
+
+        def handle_endtag(self, tag: str) -> None:
+            if tag.lower() == "a" and self.capture:
+                title = "".join(self.buffer).strip()
+                if title:
+                    self.tracks.append(title)
+                self.capture = False
+                self.buffer = []
+
+    parser = TrackParser()
+    try:
+        parser.feed(html)
+    except Exception:
+        return []
+    # Preserve order while removing duplicates
+    seen = set()
+    unique_tracks: List[str] = []
+    for title in parser.tracks:
+        if title not in seen:
+            unique_tracks.append(title)
+            seen.add(title)
+    return unique_tracks
+
+
+def fetch_rahab_tracks(category_url: str = RAHAB_CATEGORY_URL, max_pages: int = 3) -> List[str]:
+    tracks: List[str] = []
+    seen = set()
+    for page in range(1, max_pages + 1):
+        url = category_url if page == 1 else urljoin(category_url, f"page/{page}/")
+        try:
+            req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urlopen(req, timeout=20) as resp:
+                html = resp.read().decode("utf-8", errors="ignore")
+        except Exception as exc:  # noqa: BLE001 - keep running even if network fails
+            log(f"WARN: Failed to fetch Rahab tracks from {url}: {exc}")
+            break
+
+        titles = parse_rahab_tracks(html)
+        for title in titles:
+            if title not in seen:
+                tracks.append(title)
+                seen.add(title)
+
+        if not titles:
+            break
+
+    return tracks
+
+
+def build_rahab_worldview_block(tracks: List[str]) -> str:
+    if not tracks:
+        return ""
+
+    lines = [
+        "Rahab Punkaholic Girls のNFTミュージックから拾った曲とモチーフ:",
+    ]
+    for title in tracks:
+        lines.append(f"- {title}")
+    lines.append(
+        "これらの曲が描く反抗・救済・信仰と市場の緊張感を主張に織り込み、"
+        "記事テーマと共鳴させてください。"
+    )
+    return "\n".join(lines)
+
+
 def write_section_body_with_llama3(
     keyword: str,
     persona: str,
@@ -550,6 +744,7 @@ def write_section_body_with_llama3(
     overview: str,
     index_text: str,
     knowledge_text: str,
+    rahab_context: str = "",
 ) -> str:
     """
     llama3:8b に1セクション分の約1500字の本文を書かせる（日本語のみ）。
@@ -577,6 +772,9 @@ def write_section_body_with_llama3(
 
         知識ファイルからの抜粋:
         {knowledge_text}
+
+        Rahab Punkaholic Girls の楽曲が示す世界観・主張:
+        {rahab_context}
 
         上記をすべて踏まえて、このセクションの本文を**日本語だけで**
         1000〜1500文字を目安に論文風で執筆してください。
@@ -858,6 +1056,7 @@ def write_conclusion_with_llama3(
     persona: str,
     overview: str,
     all_section_bodies: List[str],
+    rahab_context: str = "",
 ) -> str:
     """
     日本語で総論を書く。本文もすべて日本語。
@@ -871,6 +1070,9 @@ def write_conclusion_with_llama3(
 
         記事の概要（日本語）:
         {overview}
+
+        Rahab Punkaholic Girls の曲がもたらす世界観:
+        {rahab_context}
 
         以下に、すでに執筆済みの各セクション本文があります（日本語）。
         ----
@@ -1031,10 +1233,10 @@ def main() -> None:
         log(f"ERROR: No index files found under {INDEX_ROOT}")
         return
 
-    matched_indexes = search_indexes(keyword, index_files)
+    matched_indexes = locate_relevant_indexes(keyword, index_files)
     log(f"Search hits for keyword '{keyword}': {len(matched_indexes)}")
     if not matched_indexes:
-        log("No search hits found. Skipping article generation.")
+        log("No search hits found after fallbacks. Skipping article generation.")
         return
 
     chosen_index = choose_index_with_phi3(keyword, matched_indexes)
@@ -1046,9 +1248,16 @@ def main() -> None:
     index_text_full = read_text(chosen_index, max_chars=4000)
     knowledge_text = collect_knowledge_text(chosen_index, max_chars=8000)
 
+    rahab_tracks = fetch_rahab_tracks()
+    rahab_context = build_rahab_worldview_block(rahab_tracks)
+    if rahab_context:
+        log(f"Loaded {len(rahab_tracks)} Rahab Punkaholic Girls tracks.")
+    else:
+        log("WARN: Failed to load Rahab Punkaholic Girls tracks; continuing.")
+
     # 3) メタ情報を phi3 で生成（日本語）
     log("Generating Japanese metadata with phi3...")
-    meta_ja = generate_metadata_with_phi3(keyword, index_text_full)
+    meta_ja = generate_metadata_with_phi3(keyword, index_text_full, rahab_context)
     meta_ja = normalize_metadata(meta_ja, keyword, description_source=index_text_full[:240])
     if not meta_ja.get("title"):
         log("WARN: metadata title is empty; using keyword as fallback title.")
@@ -1063,7 +1272,7 @@ def main() -> None:
 
     # 4) 7セクション構成を phi3 で生成（日本語）
     log("Generating 7 Japanese sections with phi3...")
-    sections_ja = generate_sections_with_phi3(keyword, overview_ja)
+    sections_ja = generate_sections_with_phi3(keyword, overview_ja, rahab_context)
     log(f"Generated {len(sections_ja)} sections (JA)")
 
     # 5) 各セクション本文を生成（日本語）
@@ -1078,6 +1287,7 @@ def main() -> None:
             overview=overview_ja,
             index_text=index_text_full,
             knowledge_text=knowledge_text,
+            rahab_context=rahab_context,
         )
         section_bodies_ja.append(clean_paragraphs(body))
 
@@ -1088,6 +1298,7 @@ def main() -> None:
         persona=persona,
         overview=overview_ja,
         all_section_bodies=section_bodies_ja,
+        rahab_context=rahab_context,
     )
     conclusion_ja = clean_paragraphs(conclusion_ja, max_chars=1800)
 
