@@ -361,6 +361,8 @@ def generate_metadata_with_phi3(keyword: str, index_text: str) -> Dict[str, Any]
 
         以下のインデックス内容をよく読み、このテーマに沿ったブログ記事の
         メタ情報を**すべて日本語**で作成してください。
+        インデックスに書かれていない事実は絶対に補わず、推測で埋めないでください。
+        わからない場合は「情報が不足している」と簡潔に書いてください。
 
         <INDEX>
         {index_text}
@@ -400,6 +402,7 @@ def generate_sections_with_phi3(keyword: str, overview: str) -> List[Dict[str, s
         あなたは長文ブログの構成作家です。
         テーマ「{keyword}」の記事について、以下の概要を元に
         7つのセクション構成を**日本語**で考えてください。
+        概要やインデックスに書かれていない固有名詞や事実を新規に作らないでください。
 
         概要（日本語）:
         {overview}
@@ -551,6 +554,9 @@ def write_section_body_with_llama3(
         条件:
         - 出力はすべて自然な日本語で書くこと（英語の文を混在させない）
         - セクションのタイトルと概要に沿った内容にすること
+        - インデックスと知識ファイルに書かれている情報から論を組み立て、
+          そこにない事実を作らないこと。情報が不足している場合は、
+          「情報が不足している」と述べて補わないこと。
         - 同じ文章の繰り返しや文字数稼ぎを避け、不要なら短くまとめること
         - 特定の企業・取引所・コイン等の宣伝は一切しないこと
         - 読者に思考を促すような哲学的な語り口にすること
@@ -759,6 +765,20 @@ def ensure_visual_snippet(
     snippet = html_snippet.strip()
     if not snippet:
         log(f"WARN: Empty visual snippet for section '{section_title}', using fallback.")
+        return build_fallback_visual(section_title, section_body, heading_label)
+    # フルHTMLを誤って返している場合は破損を避けるためフォールバック
+    lowered = snippet.lower()
+    if any(tag in lowered for tag in ["<html", "<head", "<body", "<!doctype"]):
+        log(
+            "WARN: Visual snippet contained full document tags; "
+            f"using fallback for '{section_title}'."
+        )
+        return build_fallback_visual(section_title, section_body, heading_label)
+    if "auto-visual" not in snippet:
+        log(
+            "WARN: Visual snippet missing expected wrapper; "
+            f"using fallback for '{section_title}'."
+        )
         return build_fallback_visual(section_title, section_body, heading_label)
     # LLM がコードではなく指示文だけ返したケースも補正
     if "<" not in snippet:
