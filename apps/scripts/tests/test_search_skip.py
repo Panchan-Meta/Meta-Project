@@ -24,7 +24,8 @@ def test_main_skips_when_no_hits(monkeypatch, tmp_path):
     monkeypatch.setattr(blog_server, "log", lambda msg: logs.append(msg))
     monkeypatch.setattr(blog_server, "select_keywords", lambda keywords, seed=None: keywords)
     monkeypatch.setattr(blog_server, "find_index_files", lambda root: [tmp_path / "index.txt"])
-    monkeypatch.setattr(blog_server, "search_indexes", lambda kw, files: [])
+    monkeypatch.setattr(blog_server, "locate_relevant_indexes", lambda kw, files: [])
+    monkeypatch.setattr(blog_server, "fetch_rahab_tracks", lambda *args, **kwargs: [])
 
     blog_server.main()
 
