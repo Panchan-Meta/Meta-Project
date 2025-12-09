@@ -36,11 +36,16 @@ import os
 import random
 import re
 import socket
+import sys
 import textwrap
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from apps.scripts.keyword_selector import generate_search_query, select_keywords
 
