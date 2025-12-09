@@ -42,6 +42,8 @@ from typing import Any, Dict, List, Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from apps.scripts.keyword_selector import generate_search_query, select_keywords
+
 # ====== 設定 =========================================================
 
 # Ollama のエンドポイント
@@ -299,6 +301,27 @@ def find_index_files(root: Path) -> List[Path]:
     return files
 
 
+def search_indexes(keyword: str, files: List[Path]) -> List[Path]:
+    """
+    Return index files that mention the keyword.
+
+    A lightweight substring search keeps the function deterministic and
+    testable without external services.
+    """
+
+    hits: List[Path] = []
+    if not keyword.strip():
+        return hits
+
+    query = generate_search_query(keyword)
+    lowered_query = query.lower()
+    for path in files:
+        text = read_text(path, max_chars=2000).lower()
+        if lowered_query and lowered_query in text:
+            hits.append(path)
+    return hits
+
+
 def choose_index_with_phi3(keyword: str, files: List[Path]) -> Optional[Path]:
     """
     複数のインデックス候補から、phi3:mini に 1 つ選ばせる。
@@ -358,6 +381,8 @@ def generate_metadata_with_phi3(keyword: str, index_text: str) -> Dict[str, Any]
         あなたは「Panchan」というペルソナに向けた
         日本語ブログの編集者です。
         テーマは「{keyword}」です。
+        ペルソナ特徴: 静かな考察を好み、批判的だが希望も探る。
+        トーン: シリアスだが読者に寄り添う穏やかな口調。
 
         以下のインデックス内容をよく読み、このテーマに沿ったブログ記事の
         メタ情報を**すべて日本語**で作成してください。
@@ -372,8 +397,8 @@ def generate_metadata_with_phi3(keyword: str, index_text: str) -> Dict[str, Any]
         キーも値も日本語で書き、英語文は使わないでください。
 
         {{
-          "title": "ペルソナに刺さるタイトル。日本語で50文字以内",
-          "description": "約200文字のディスクリプション。日本語で記事の魅力が伝わるように書く。",
+          "title": "ペルソナ特徴とトーンを踏まえたタイトル。日本語で50文字以内",
+          "description": "約200文字のディスクリプション。ペルソナに向けた魅力とトーンを含める。",
           "tags": ["タグ1", "タグ2", "タグ3", "タグ4", "タグ5", "タグ6"],
           "overview": "記事全体の内容をまとめた概要。約500文字。日本語のみで書く。"
         }}
@@ -609,12 +634,18 @@ def normalize_description(
     if not desc:
         return ""
 
-    max_len = target + tolerance
+    min_len = max(0, target - 20)
+    max_len = target + 20
+
     if len(desc) > max_len:
-        trimmed = desc[:target]
+        trimmed = desc[:max_len]
         if "。" in trimmed:
             trimmed = trimmed.rsplit("。", 1)[0] + "。"
         desc = trimmed
+
+    if len(desc) < min_len and len(desc) > 0:
+        desc = desc.ljust(min_len, "。")
+
     return desc
 
 
@@ -979,17 +1010,29 @@ def main() -> None:
 
     persona = "Panchan"
 
-    # 1) キーワードをランダムに選択
-    keyword = random.choice(KEYWORDS)
+    # 1) キーワードをランダムに選択（シード指定可）
+    seed_env = os.environ.get("BLOG_KEYWORD_SEED")
+    seed = int(seed_env) if seed_env and seed_env.isdigit() else None
+    keyword_candidates = select_keywords(KEYWORDS, seed=seed)
+    if not keyword_candidates:
+        log("ERROR: No keywords available.")
+        return
+    keyword = keyword_candidates[0]
     log(f"Selected keyword: {keyword}")
 
-    # 2) インデックスファイル一覧を取得し、phi3 で1つ選ぶ
+    # 2) インデックスファイル一覧を取得し、検索でヒットを確認
     index_files = find_index_files(INDEX_ROOT)
     if not index_files:
         log(f"ERROR: No index files found under {INDEX_ROOT}")
         return
 
-    chosen_index = choose_index_with_phi3(keyword, index_files)
+    matched_indexes = search_indexes(keyword, index_files)
+    log(f"Search hits for keyword '{keyword}': {len(matched_indexes)}")
+    if not matched_indexes:
+        log("No search hits found. Skipping article generation.")
+        return
+
+    chosen_index = choose_index_with_phi3(keyword, matched_indexes)
     if not chosen_index:
         log("ERROR: Failed to choose index file.")
         return
