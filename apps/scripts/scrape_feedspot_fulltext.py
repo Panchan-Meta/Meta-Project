@@ -2,12 +2,14 @@
 
 For each configured category, the script:
 - Creates a directory for the category if it does not already exist.
-- Removes files older than the configured threshold (3 days).
-- Downloads the RSS feed, extracts post links, and saves each article.
+- Removes files older than the configured per-category threshold.
+- Downloads the RSS feed, extracts post links (and any embedded hyperlinks),
+  and saves each article.
 - Crawls the article for hyperlinks and saves each linked page once.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 import hashlib
 import re
 import sys
@@ -17,37 +19,60 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Optional
 from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlsplit, urlunsplit
 
 BASE_DIR = Path("indexes")
-OLD_FILE_THRESHOLD = timedelta(days=3)
+DEFAULT_OLD_FILE_THRESHOLD = timedelta(days=3)
 
-CATEGORIES: dict[str, tuple[str, ...]] = {
-    "Web3（Web3 Blogs）": ("https://rss.feedspot.com/folder/5hvFsWUc5w==/rss/rsscombiner",),
-    "NFT（NFT Blogs）": ("https://rss.feedspot.com/folder/5hvFsWQd4w==/rss/rsscombiner",),
-    "Cryptocurrency _ Crypto Investors（Cryptocurrency Blogs）": (
-        "https://rss.feedspot.com/folder/5hvFsWUc5Q==/rss/rsscombiner",
+
+@dataclass(frozen=True)
+class CategoryConfig:
+    feeds: tuple[str, ...]
+    old_file_threshold: timedelta = DEFAULT_OLD_FILE_THRESHOLD
+    parse_description_links: bool = True
+
+
+CATEGORIES: dict[str, CategoryConfig] = {
+    "Web3（Web3 Blogs）": CategoryConfig(
+        ("https://rss.feedspot.com/folder/5hvFsWUc5w==/rss/rsscombiner",)
     ),
-    "DeFi（DeFi Blogs）": ("https://rss.feedspot.com/folder/5hvItF4h6A==/rss/rsscombiner",),
-    "Blockchain & Cryptocurrency Security": (
-        "https://rss.feedspot.com/folder/5hvItF4h6Q==/rss/rsscombiner",
+    "NFT（NFT Blogs）": CategoryConfig(
+        ("https://rss.feedspot.com/folder/5hvFsWQd4w==/rss/rsscombiner",)
     ),
-    "Cybersecurity（Cyber Security Blogs）": (
-        "https://rss.feedspot.com/folder/5hvItF4h6g==/rss/rsscombiner",
+    "Cryptocurrency _ Crypto Investors（Cryptocurrency Blogs）": CategoryConfig(
+        ("https://rss.feedspot.com/folder/5hvFsWUc5Q==/rss/rsscombiner",)
     ),
-    "Hacking _ Hacker Blogs": (
-        "https://rss.feedspot.com/folder/5hvItF4i4w==/rss/rsscombiner",
-        "https://rss.feedspot.com/folder/5hvItF4h7A==/rss/rsscombiner",
+    "DeFi（DeFi Blogs）": CategoryConfig(
+        ("https://rss.feedspot.com/folder/5hvItF4h6A==/rss/rsscombiner",)
     ),
-    "Geopolitics（Geopolitics Blogs）": (
-        "https://rss.feedspot.com/folder/5hvItF4i5A==/rss/rsscombiner",
+    "Blockchain & Cryptocurrency Security": CategoryConfig(
+        ("https://rss.feedspot.com/folder/5hvItF4h6Q==/rss/rsscombiner",)
     ),
-    "Mental Health _ Mind _ Psychology": (
-        "https://rss.feedspot.com/folder/5hvItF4i5Q==/rss/rsscombiner",
+    "Cybersecurity（Cyber Security Blogs）": CategoryConfig(
+        ("https://rss.feedspot.com/folder/5hvItF4h6g==/rss/rsscombiner",)
     ),
-    "Dystopian _ Sci-Fi（Dystopian Book Blogs）": (
-        "https://rss.feedspot.com/folder/5hvItF4i5g==/rss/rsscombiner",
+    "Hacking _ Hacker Blogs": CategoryConfig(
+        (
+            "https://rss.feedspot.com/folder/5hvItF4i4w==/rss/rsscombiner",
+            "https://rss.feedspot.com/folder/5hvItF4h7A==/rss/rsscombiner",
+        )
+    ),
+    "Geopolitics（Geopolitics Blogs）": CategoryConfig(
+        ("https://rss.feedspot.com/folder/5hvItF4i5A==/rss/rsscombiner",)
+    ),
+    "Mental Health _ Mind _ Psychology": CategoryConfig(
+        ("https://rss.feedspot.com/folder/5hvItF4i5Q==/rss/rsscombiner",)
+    ),
+    "Dystopian _ Sci-Fi（Dystopian Book Blogs）": CategoryConfig(
+        ("https://rss.feedspot.com/folder/5hvItF4i5g==/rss/rsscombiner",)
+    ),
+    "Music": CategoryConfig(
+        (
+            "https://rss.feedspot.com/folder/5hvItGAa6g==/rss/rsscombiner",
+            "https://rss.feedspot.com/folder/5hvItGAa6Q==/rss/rsscombiner",
+        ),
+        old_file_threshold=timedelta(days=7),
     ),
 }
 
@@ -139,29 +164,53 @@ def extract_links_from_html(base_url: str, html_content: bytes) -> set[str]:
     return parser.links
 
 
-def parse_rss_links(content: bytes) -> list[str]:
+def parse_rss_links(content: bytes, include_description_links: bool) -> list[str]:
     try:
         root = ET.fromstring(content)
     except ET.ParseError:
         return []
 
     links: list[str] = []
+    seen: set[str] = set()
+
+    def add_link(candidate: Optional[str]) -> None:
+        if not candidate:
+            return
+        cleaned = candidate.strip()
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            links.append(cleaned)
+
     for item in root.findall(".//item"):
         link_el = item.find("link")
         if link_el is not None and link_el.text:
-            trimmed = link_el.text.strip()
-            if trimmed:
-                links.append(trimmed)
+            add_link(link_el.text)
+
+        if include_description_links:
+            base_url = link_el.text.strip() if link_el is not None and link_el.text else ""
+            for tag_name in (
+                "description",
+                "{http://purl.org/rss/1.0/modules/content/}encoded",
+            ):
+                tag = item.find(tag_name)
+                if tag is None or not tag.text:
+                    continue
+
+                fragment_links = extract_links_from_html(
+                    base_url, tag.text.encode("utf-8", errors="ignore")
+                )
+                for fragment_link in fragment_links:
+                    add_link(fragment_link)
 
     return links
 
 
-def process_category(category: str, feeds: Iterable[str]) -> None:
+def process_category(category: str, config: CategoryConfig) -> None:
     category_dir = BASE_DIR / safe_directory_name(category)
     category_dir.mkdir(parents=True, exist_ok=True)
-    remove_old_files(category_dir, OLD_FILE_THRESHOLD)
+    remove_old_files(category_dir, config.old_file_threshold)
 
-    for feed_url in feeds:
+    for feed_url in config.feeds:
         feed_name = sanitize_filename(feed_url) + ".xml"
         feed_path = category_dir / feed_name
         try:
@@ -183,7 +232,7 @@ def process_category(category: str, feeds: Iterable[str]) -> None:
             )
             continue
 
-        item_links = parse_rss_links(feed_content)
+        item_links = parse_rss_links(feed_content, config.parse_description_links)
         for item_link in item_links:
             article_name = sanitize_filename(item_link) + ".html"
             article_path = category_dir / article_name
@@ -244,8 +293,8 @@ def process_category(category: str, feeds: Iterable[str]) -> None:
 
 def main() -> None:
     BASE_DIR.mkdir(parents=True, exist_ok=True)
-    for category, feeds in CATEGORIES.items():
-        process_category(category, feeds)
+    for category, config in CATEGORIES.items():
+        process_category(category, config)
 
 
 if __name__ == "__main__":
