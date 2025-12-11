@@ -17,7 +17,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Optional
 from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlsplit, urlunsplit
 
 BASE_DIR = Path("indexes")
@@ -73,7 +73,7 @@ def sanitize_filename(url: str, max_length: int = 200) -> str:
     return trimmed
 
 
-def normalize_url(url: str) -> str | None:
+def normalize_url(url: str) -> Optional[str]:
     """Percent-encode unsafe characters and validate the scheme."""
 
     trimmed = url.strip()
@@ -122,7 +122,7 @@ def extract_links_from_html(base_url: str, html_content: bytes) -> set[str]:
             super().__init__()
             self.links: set[str] = set()
 
-        def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        def handle_starttag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
             if tag.lower() != "a":
                 return
             for attr, value in attrs:
