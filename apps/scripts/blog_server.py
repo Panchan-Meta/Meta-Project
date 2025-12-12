@@ -4,7 +4,7 @@
 auto_article_generator.py
 
 スクレイピング済みの indexes/articles 配下のインデックスを入口に、
-mybrain を含む知識ファイルをコンテキストにして 3言語記事を自動生成するスクリプト。
+mybrain を含む知識ファイルをコンテキストにして 日本語記事（+ 日本語図解） を自動生成するスクリプト。
 
 フロー:
  1. キーワードを1つランダムに選択
@@ -17,11 +17,10 @@ mybrain を含む知識ファイルをコンテキストにして 3言語記事�
     を JSON で生成させる
  4. 概要をもとに phi3:mini に 7 セクションのアウトラインを日本語で作らせる
  5. 各セクションごとに
-      - llama3:8b に約1500字の本文を書かせる（日本語のみ）
+      - llama3:8b に約1000〜1200字の本文を書かせる（日本語のみ）
  6. すべての日本語本文をもとに、llama3:8b に約1500字の総論を書かせる（日本語のみ）
- 7. 日本語 → 英語 / イタリア語に llama3:8b で翻訳して多言語版を作る
- 8. 英語タイトル＋英語本文を元に、codegemma:2b でリッチな図解 HTML を作成
- 9. 日本語・英語・イタリア語の3つのHTMLファイルとメタ情報(JSON)を保存する
+ 7. 日本語本文をもとに、qwen2.5-coder:7b で日本語図解HTMLを作成する（各セクション1つ）
+ 8. 日本語のHTMLファイルとメタ情報(JSON)を保存する
 
 ログ:
   - 各プロセスごとに /var/www/Meta-Project/apps/logs/Blog に
@@ -290,8 +289,8 @@ def slugify(value: str) -> str:
 
 def translate_text(text: str, target_lang: str) -> str:
     """
-    日本語テキストを target_lang (English / Italian) に翻訳する。
-    翻訳は llama3:8b を使用。
+    日本語テキストを target_lang に翻訳する。
+    ※現バージョンでは main() からは呼ばない（将来拡張用）。
     """
     if not text.strip():
         return text
@@ -523,7 +522,6 @@ def generate_metadata_with_phi3(
     meta = extract_json_block(res) or {}
     return meta
 
-
 # ====== ステップ 3: 7 セクション構成 ================================
 
 
@@ -629,12 +627,10 @@ def generate_sections_with_phi3(
     return cleaned
 
 
-
-
 # ====== ステップ 4: 各セクション本文 ================================
 
 
-def collect_knowledge_text(chosen_index: Path, max_chars: int = 8000) -> str:
+def collect_knowledge_text(chosen_index: Path, max_chars: int = 4000) -> str:
     """
     インデックスファイルと、その周辺の知識ファイルを連結して
     LLM に渡すコンテキストテキストを作る。
@@ -705,7 +701,11 @@ def parse_rahab_tracks(html: str) -> List[str]:
     return unique_tracks
 
 
-def fetch_rahab_tracks(category_url: str = RAHAB_CATEGORY_URL, max_pages: int = 3) -> List[str]:
+def fetch_rahab_tracks(category_url: str = RAHAB_CATEGORY_URL, max_pages: int = 1) -> List[str]:
+    """
+    Rahab のカテゴリページから曲タイトルを取得する。
+    パフォーマンスのため、デフォルトでは 1 ページのみ見る。
+    """
     tracks: List[str] = []
     seen = set()
     for page in range(1, max_pages + 1):
@@ -757,7 +757,8 @@ def write_section_body_with_llama3(
     rahab_context: str = "",
 ) -> str:
     """
-    llama3:8b に1セクション分の約1500字の本文を書かせる（日本語のみ）。
+    llama3:8b に1セクション分の本文を書かせる（日本語のみ）。
+    目安: 1000〜1200文字。
     """
     prompt = textwrap.dedent(
         f"""
@@ -789,7 +790,7 @@ def write_section_body_with_llama3(
         {rahab_context}
 
         上記をすべて踏まえて、このセクションの本文を**日本語だけで**
-        1000〜1500文字を目安に論文風で執筆してください。
+        1000〜1200文字を目安に論文風で執筆してください。
 
         条件:
         - 出力はすべて自然な日本語で書くこと（英語の文を混在させない）
@@ -806,7 +807,7 @@ def write_section_body_with_llama3(
     return call_ollama_generate(MODEL_LLAMA3, prompt)
 
 
-def clean_paragraphs(text: str, max_chars: int = 1600) -> str:
+def clean_paragraphs(text: str, max_chars: int = 1400) -> str:
     """
     - 連続した重複段落を間引く
     - 文字数が長すぎる場合は適度に切り詰める
@@ -898,7 +899,7 @@ def normalize_metadata(meta: Dict[str, Any], keyword: str, description_source: s
     return normalized
 
 
-# ====== 図解 HTML（英語タイトル＋英語本文ベース） ====================
+# ====== 図解 HTML（日本語セクションのみ） ===========================
 
 
 def write_section_html_with_codegemma(
@@ -907,7 +908,7 @@ def write_section_html_with_codegemma(
     diagram_language: str,
 ) -> str:
     """
-    codegemma:2b に、セクション内容を可視化する
+    codegemma に、セクション内容を可視化する
     リッチな HTML (JS + CSS 込み) を作らせる。
     """
     prompt = textwrap.dedent(
@@ -933,7 +934,7 @@ def write_section_html_with_codegemma(
           * simple chart that updates on click.
         - Use a responsive layout with flexbox or CSS grid.
 
-        DIAGRAM PATTERNS (pick ONE that fits best, aligned with the list below):
+        DIAGRAM PATTERNS (pick ONE that fits best):
         - Article roadmap / progress tracker (セクション1〜7の全体像)
         - Concept map / mind map（概念・用語の関係図）
         - Flowchart or step-by-step process（仕組みやデータの流れ）
@@ -956,6 +957,7 @@ def write_section_html_with_codegemma(
               </section>
         - Use only inline CSS (<style>) and inline JS (<script>).
         - Do NOT load external libraries (no CDN, no frameworks).
+        - Do NOT wrap your answer in ``` fences.
 
         SECTION TITLE ({diagram_language}):
         {section_title}
@@ -1009,30 +1011,52 @@ def build_fallback_visual(
 def ensure_visual_snippet(
     section_title: str, section_body: str, html_snippet: str, heading_label: str
 ) -> str:
-    snippet = html_snippet.strip()
+    """
+    図解HTMLを検証しつつ、多少の崩れは許容して採用する。
+    本当に壊れている場合のみ箇条書きのフォールバックに落とす。
+    """
+    snippet = (html_snippet or "").strip()
     if not snippet:
         log(f"WARN: Empty visual snippet for section '{section_title}', using fallback.")
         return build_fallback_visual(section_title, section_body, heading_label)
-    # フルHTMLを誤って返している場合は破損を避けるためフォールバック
+
+    # ```html ... ``` 形式を剥がす
+    if snippet.startswith("```"):
+        snippet = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", snippet)
+        snippet = re.sub(r"\s*```$", "", snippet).strip()
+
     lowered = snippet.lower()
+
+    # フルHTMLドキュメントを返してきた場合は破綻しやすいのでフォールバック
     if any(tag in lowered for tag in ["<html", "<head", "<body", "<!doctype"]):
         log(
             "WARN: Visual snippet contained full document tags; "
             f"using fallback for '{section_title}'."
         )
         return build_fallback_visual(section_title, section_body, heading_label)
-    if "auto-visual" not in snippet:
-        log(
-            "WARN: Visual snippet missing expected wrapper; "
-            f"using fallback for '{section_title}'."
-        )
-        return build_fallback_visual(section_title, section_body, heading_label)
-    # LLM がコードではなく指示文だけ返したケースも補正
+
+    # HTMLタグが全くない場合もフォールバック
     if "<" not in snippet:
         log(
             f"WARN: Visual snippet missing HTML tags for '{section_title}', using fallback."
         )
         return build_fallback_visual(section_title, section_body, heading_label)
+
+    # auto-visual が無い場合はこちらでラップする
+    if "auto-visual" not in snippet:
+        log(
+            "INFO: Visual snippet missing 'auto-visual' wrapper; "
+            f"wrapping snippet for '{section_title}'."
+        )
+        snippet = textwrap.dedent(
+            f"""
+            <section class="auto-visual">
+              <h3>{section_title} – {heading_label}</h3>
+              {snippet}
+            </section>
+            """
+        ).strip()
+
     return snippet
 
 
@@ -1041,9 +1065,9 @@ def generate_section_visuals(
     section_bodies: List[str],
     lang_code: str,
 ) -> List[str]:
-    lang_config = DIAGRAM_LANG_CONFIG.get(lang_code, DIAGRAM_LANG_CONFIG["en"])
-    heading_label = lang_config.get("heading", "Key Takeaways")
-    diagram_language = lang_config.get("label", "English")
+    lang_config = DIAGRAM_LANG_CONFIG.get(lang_code, DIAGRAM_LANG_CONFIG["ja"])
+    heading_label = lang_config.get("heading", "主要ポイント")
+    diagram_language = lang_config.get("label", "Japanese")
 
     visuals: List[str] = []
     for i, sec in enumerate(sections):
@@ -1119,7 +1143,7 @@ def build_html_document(
 ) -> str:
     """
     1言語分の HTML を組み立てる。
-    section_htmls は各言語に合わせた図解 HTML。
+    現バージョンでは lang="ja" のみ使用。
     """
     title = str(meta.get("title") or "自動生成記事")
     description = str(meta.get("description") or "")
@@ -1215,8 +1239,6 @@ def build_html_document(
     parts.append("</html>")
 
     return "\n".join(parts)
-
-
 # ====== メイン処理 ====================================================
 
 
@@ -1259,8 +1281,9 @@ def main() -> None:
         return
 
     log(f"Chosen index file: {chosen_index}")
-    index_text_full = read_text(chosen_index, max_chars=4000)
-    knowledge_text = collect_knowledge_text(chosen_index, max_chars=8000)
+    # コンテキスト量を抑えてパフォーマンス改善
+    index_text_full = read_text(chosen_index, max_chars=2000)
+    knowledge_text = collect_knowledge_text(chosen_index, max_chars=4000)
 
     rahab_tracks = fetch_rahab_tracks()
     rahab_context = build_rahab_worldview_block(rahab_tracks)
@@ -1316,70 +1339,21 @@ def main() -> None:
     )
     conclusion_ja = clean_paragraphs(conclusion_ja, max_chars=1800)
 
-    # 7) 多言語版に翻訳（すべて llama3:8b）
-    log("Translating metadata and bodies into English...")
-    meta_en = {
-        "title": translate_text(str(meta_ja.get("title") or ""), "English"),
-        "description": translate_text(str(meta_ja.get("description") or ""), "English"),
-        "tags": [translate_text(str(t), "English") for t in (meta_ja.get("tags") or [])],
-        "overview": translate_text(overview_ja, "English"),
-    }
-    sections_en: List[Dict[str, Any]] = []
-    for sec in sections_ja:
-        sections_en.append(
-            {
-                "title": translate_text(sec.get("title", ""), "English"),
-                "summary": translate_text(sec.get("summary", ""), "English"),
-            }
-        )
-    section_bodies_en = [translate_text(b, "English") for b in section_bodies_ja]
-    conclusion_en = translate_text(conclusion_ja, "English")
-
-    log("Translating metadata and bodies into Italian...")
-    meta_it = {
-        "title": translate_text(str(meta_ja.get("title") or ""), "Italian"),
-        "description": translate_text(str(meta_ja.get("description") or ""), "Italian"),
-        "tags": [translate_text(str(t), "Italian") for t in (meta_ja.get("tags") or [])],
-        "overview": translate_text(overview_ja, "Italian"),
-    }
-    sections_it: List[Dict[str, Any]] = []
-    for sec in sections_ja:
-        sections_it.append(
-            {
-                "title": translate_text(sec.get("title", ""), "Italian"),
-                "summary": translate_text(sec.get("summary", ""), "Italian"),
-            }
-        )
-    section_bodies_it = [translate_text(b, "Italian") for b in section_bodies_ja]
-    conclusion_it = translate_text(conclusion_ja, "Italian")
-
-    # 8) 図解 HTML を各言語の本文から生成
+    # 7) 図解 HTML は日本語のみ生成
     log("Generating Japanese section visuals...")
     section_htmls_ja = generate_section_visuals(
         sections_ja, section_bodies_ja, lang_code="ja"
     )
 
-    log("Generating English section visuals...")
-    section_htmls_en = generate_section_visuals(
-        sections_en, section_bodies_en, lang_code="en"
-    )
-
-    log("Generating Italian section visuals...")
-    section_htmls_it = generate_section_visuals(
-        sections_it, section_bodies_it, lang_code="it"
-    )
-
-    # 9) HTML とメタ情報を保存
+    # 8) HTML とメタ情報を保存（日本語のみ）
     now = dt.datetime.now()
     timestamp = now.strftime("%Y%m%d-%H%M%S")
     slug = slugify(keyword)
 
     html_ja_path = OUTPUT_DIR / f"{timestamp}_{slug}_ja.html"
-    html_en_path = OUTPUT_DIR / f"{timestamp}_{slug}_en.html"
-    html_it_path = OUTPUT_DIR / f"{timestamp}_{slug}_it.html"
     json_path = OUTPUT_DIR / f"{timestamp}_{slug}_meta.json"
 
-    log(f"Saving HTML files and metadata to {OUTPUT_DIR} ...")
+    log(f"Saving HTML and metadata to {OUTPUT_DIR} ...")
 
     html_ja = build_html_document(
         lang="ja",
@@ -1389,34 +1363,14 @@ def main() -> None:
         section_htmls=section_htmls_ja,
         conclusion=conclusion_ja,
     )
-    html_en = build_html_document(
-        lang="en",
-        meta=meta_en,
-        sections=sections_en,
-        section_bodies=section_bodies_en,
-        section_htmls=section_htmls_en,
-        conclusion=conclusion_en,
-    )
-    html_it = build_html_document(
-        lang="it",
-        meta=meta_it,
-        sections=sections_it,
-        section_bodies=section_bodies_it,
-        section_htmls=section_htmls_it,
-        conclusion=conclusion_it,
-    )
 
     html_ja_path.write_text(html_ja, encoding="utf-8")
-    html_en_path.write_text(html_en, encoding="utf-8")
-    html_it_path.write_text(html_it, encoding="utf-8")
 
     meta_out: Dict[str, Any] = {
         "generated_at": now.isoformat(),
         "keyword": keyword,
         "index_file": str(chosen_index),
         "meta_ja": meta_ja,
-        "meta_en": meta_en,
-        "meta_it": meta_it,
         "sections_ja": sections_ja,
     }
     json_path.write_text(
@@ -1424,8 +1378,6 @@ def main() -> None:
     )
 
     log(f"Saved HTML (JA): {html_ja_path}")
-    log(f"Saved HTML (EN): {html_en_path}")
-    log(f"Saved HTML (IT): {html_it_path}")
     log(f"Saved JSON meta: {json_path}")
 
     # 経過時間ログ
@@ -1437,3 +1389,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

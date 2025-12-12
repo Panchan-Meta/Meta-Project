@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 """Utility functions for keyword selection and search query generation."""
 
 from __future__ import annotations

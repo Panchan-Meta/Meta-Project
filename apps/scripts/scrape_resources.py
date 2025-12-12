@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+
+
 """
 Script to scrape specified language/style guide, documentation, and RSS resources.
 

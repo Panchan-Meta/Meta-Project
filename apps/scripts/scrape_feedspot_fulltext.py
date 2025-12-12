@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 """Scrape Feedspot RSS feeds and download full articles plus linked pages.
 
 For each configured category, the script:
