@@ -38,6 +38,7 @@ import re
 import socket
 import sys
 import textwrap
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.error import HTTPError, URLError
@@ -80,6 +81,10 @@ TEXT_EXTS = {".txt", ".md", ".json", ".html", ".rst"}
 MODEL_PHI3 = "phi3:mini"
 MODEL_LLAMA3 = "llama3:8b"
 MODEL_CODEGEMMA = "qwen2.5-coder:7b"
+
+# Ollama リクエストのタイムアウトとリトライ設定（環境変数で上書き可能）
+OLLAMA_TIMEOUT_SEC = int(os.environ.get("BLOG_OLLAMA_TIMEOUT", "900"))
+OLLAMA_MAX_RETRIES = int(os.environ.get("BLOG_OLLAMA_MAX_RETRIES", "1"))
 
 DIAGRAM_LANG_CONFIG = {
     "ja": {"label": "Japanese", "heading": "主要ポイント"},
@@ -181,10 +186,18 @@ def log(msg: str) -> None:
 # ====== 共通ユーティリティ =========================================
 
 
-def call_ollama_generate(model: str, prompt: str, temperature: float = 0.4) -> str:
+def call_ollama_generate(
+    model: str,
+    prompt: str,
+    temperature: float = 0.4,
+    timeout: Optional[int] = None,
+) -> str:
     """
     Ollama /api/generate を叩いて単発プロンプトを投げる。
-    重い処理なのでタイムアウトは 1800 秒に設定。
+
+    - timeout 引数が指定されなければ OLLAMA_TIMEOUT_SEC を使う。
+    - タイムアウト・通信エラー時は OLLAMA_MAX_RETRIES 回までリトライする。
+    - すべて失敗した場合は空文字を返す。
     """
     url = f"{OLLAMA_BASE}/api/generate"
     payload = {
@@ -194,25 +207,57 @@ def call_ollama_generate(model: str, prompt: str, temperature: float = 0.4) -> s
         "options": {"temperature": temperature},
     }
     data = json.dumps(payload).encode("utf-8")
-    req = Request(url, data=data, headers={"Content-Type": "application/json"})
 
-    try:
-        with urlopen(req, timeout=1800) as resp:
-            body = resp.read().decode("utf-8")
-        res = json.loads(body)
-        return res.get("response", "").strip()
+    effective_timeout = timeout or OLLAMA_TIMEOUT_SEC
+    attempts = OLLAMA_MAX_RETRIES + 1
+    last_error: Optional[Exception] = None
 
-    except (TimeoutError, socket.timeout) as e:
-        log(f"ERROR: Ollama request TIMEOUT for model={model}: {e}")
-        return ""
+    for attempt in range(1, attempts + 1):
+        req = Request(url, data=data, headers={"Content-Type": "application/json"})
+        try:
+            log(
+                f"Ollama request start model={model} "
+                f"attempt={attempt}/{attempts} timeout={effective_timeout}s"
+            )
+            with urlopen(req, timeout=effective_timeout) as resp:
+                body = resp.read().decode("utf-8")
+            res = json.loads(body)
+            return res.get("response", "").strip()
 
-    except (URLError, HTTPError) as e:
-        log(f"ERROR: Ollama request failed for model={model}: {e}")
-        return ""
+        except (TimeoutError, socket.timeout) as e:
+            last_error = e
+            log(
+                f"ERROR: Ollama request TIMEOUT for model={model} "
+                f"attempt={attempt}/{attempts}: {e}"
+            )
 
-    except json.JSONDecodeError:
-        log("ERROR: Failed to decode Ollama response JSON")
-        return ""
+        except (URLError, HTTPError) as e:
+            last_error = e
+            log(
+                f"ERROR: Ollama request failed for model={model} "
+                f"attempt={attempt}/{attempts}: {e}"
+            )
+
+        except json.JSONDecodeError as e:
+            last_error = e
+            log(
+                f"ERROR: Failed to decode Ollama response JSON for model={model} "
+                f"attempt={attempt}/{attempts}: {e}"
+            )
+
+        if attempt < attempts:
+            sleep_sec = 5 * attempt
+            log(
+                f"Retrying model={model} after {sleep_sec}s "
+                f"(attempt {attempt + 1}/{attempts})"
+            )
+            time.sleep(sleep_sec)
+
+    log(
+        f"ERROR: Ollama request permanently failed for model={model}. "
+        f"returning empty string. last_error={last_error}"
+    )
+    return ""
 
 
 def extract_json_block(text: str) -> Optional[Dict[str, Any]]:
@@ -459,7 +504,7 @@ def choose_index_with_phi3(keyword: str, files: List[Path]) -> Optional[Path]:
         {joined}
         """
     )
-    res = call_ollama_generate(MODEL_PHI3, prompt)
+    res = call_ollama_generate(MODEL_PHI3, prompt, timeout=600)
     m = re.search(r"\d+", res)
     if not m:
         log("WARN: phi3 から選択番号が取得できなかったため、先頭ファイルを採用します。")
@@ -518,7 +563,7 @@ def generate_metadata_with_phi3(
         }}
         """
     )
-    res = call_ollama_generate(MODEL_PHI3, prompt)
+    res = call_ollama_generate(MODEL_PHI3, prompt, timeout=600)
     meta = extract_json_block(res) or {}
     return meta
 
@@ -570,7 +615,7 @@ def generate_sections_with_phi3(
         """
     )
 
-    res = call_ollama_generate(MODEL_PHI3, prompt)
+    res = call_ollama_generate(MODEL_PHI3, prompt, timeout=600)
     sections = extract_json_list(res) or []
 
     cleaned: List[Dict[str, str]] = []
