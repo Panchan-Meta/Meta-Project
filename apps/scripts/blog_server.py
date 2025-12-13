@@ -1022,32 +1022,131 @@ def build_fallback_visual(
     """LLM が HTML を返さない場合に備えた簡易ビジュアル。"""
     sentences = [s.strip() for s in re.split(r"[。.!?]\s*", section_body) if s.strip()]
     bullets = sentences[:4] if sentences else [section_title]
-    items = "".join(
-        f"<li>{textwrap.shorten(b, width=140, placeholder='…')}</li>" for b in bullets
+    cards = "".join(
+        textwrap.dedent(
+            f"""
+            <div class=\"visual-card\" data-step=\"{idx}\">
+              <div class=\"visual-step\">{idx}</div>
+              <p>{textwrap.shorten(b, width=140, placeholder='…')}</p>
+            </div>
+            """
+        )
+        for idx, b in enumerate(bullets, 1)
     )
     return textwrap.dedent(
         f"""
         <section class="auto-visual fallback-visual">
           <h3>{section_title} – {heading_label}</h3>
-          <ul>{items}</ul>
+          <div class="visual-grid">{cards}</div>
+          <div class="visual-legend">
+            <span class="legend-dot primary"></span> セクションの主要ポイント
+            <span class="legend-dot accent"></span> マウスオーバーで強調表示
+          </div>
           <style>
             .fallback-visual {{
               border: 1px solid #d0d7de;
-              border-radius: 8px;
+              border-radius: 10px;
               padding: 1rem;
-              background: #f8fafc;
+              background: radial-gradient(circle at 10% 20%, #f1f5f9 0, #fff 60%);
+              box-shadow: 0 6px 18px rgba(15, 23, 42, 0.08);
             }}
             .fallback-visual h3 {{
-              margin-top: 0;
+              margin: 0 0 0.8rem;
               font-size: 1.1rem;
+              display: flex;
+              align-items: center;
+              gap: 0.35rem;
             }}
-            .fallback-visual ul {{
-              padding-left: 1.2rem;
-              margin: 0.5rem 0 0;
+            .fallback-visual h3::before {{
+              content: "\2728";
+              font-size: 1rem;
+            }}
+            .visual-grid {{
               display: grid;
-              gap: 0.3rem;
+              grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+              gap: 0.75rem;
             }}
+            .visual-card {{
+              border: 1px solid #e2e8f0;
+              border-radius: 10px;
+              padding: 0.9rem;
+              background: #f8fafc;
+              position: relative;
+              transition: transform 0.2s ease, box-shadow 0.2s ease,
+                border-color 0.2s ease;
+              overflow: hidden;
+            }}
+            .visual-card::after {{
+              content: "";
+              position: absolute;
+              inset: 0;
+              background: linear-gradient(120deg, rgba(59, 130, 246, 0.12), transparent 60%);
+              opacity: 0;
+              transition: opacity 0.2s ease;
+              pointer-events: none;
+            }}
+            .visual-card p {{
+              margin: 0;
+              color: #0f172a;
+              font-weight: 600;
+              font-size: 0.95rem;
+            }}
+            .visual-step {{
+              width: 32px;
+              height: 32px;
+              border-radius: 50%;
+              background: linear-gradient(135deg, #3b82f6, #6366f1);
+              color: #fff;
+              display: grid;
+              place-items: center;
+              font-weight: 700;
+              margin-bottom: 0.5rem;
+              box-shadow: 0 4px 12px rgba(59, 130, 246, 0.35);
+            }}
+            .visual-card:hover {{
+              transform: translateY(-2px);
+              box-shadow: 0 10px 22px rgba(15, 23, 42, 0.12);
+              border-color: #94a3b8;
+            }}
+            .visual-card:hover::after {{
+              opacity: 1;
+            }}
+            .visual-legend {{
+              display: flex;
+              align-items: center;
+              gap: 0.6rem;
+              font-size: 0.85rem;
+              color: #475569;
+              margin-top: 0.75rem;
+              flex-wrap: wrap;
+            }}
+            .legend-dot {{
+              display: inline-block;
+              width: 12px;
+              height: 12px;
+              border-radius: 50%;
+              margin-right: 0.25rem;
+            }}
+            .legend-dot.primary {{ background: #3b82f6; }}
+            .legend-dot.accent {{ background: #f97316; }}
           </style>
+          <script>
+            (() => {{
+              const cards = Array.from(
+                document.querySelectorAll('.fallback-visual .visual-card')
+              );
+              cards.forEach((card) => {{
+                card.addEventListener('mouseenter', () => {{
+                  cards.forEach((c) => c.classList.remove('active'));
+                  card.classList.add('active');
+                }});
+                card.addEventListener('mouseleave', () => {{
+                  card.classList.remove('active');
+                }});
+              }});
+              if (cards[0]) cards[0].classList.add('active');
+            }})();
+          </script>
         </section>
         """
     ).strip()
@@ -1084,6 +1183,19 @@ def ensure_visual_snippet(
     if "<" not in snippet:
         log(
             f"WARN: Visual snippet missing HTML tags for '{section_title}', using fallback."
+        )
+        return build_fallback_visual(section_title, section_body, heading_label)
+
+    tags = {
+        t.lower()
+        for t in re.findall(r"<\s*/?\s*([a-zA-Z0-9:-]+)", snippet)
+        if t
+    }
+    simple_list_tags = {"section", "h3", "ul", "ol", "li", "p", "br"}
+    if ("ul" in tags or "ol" in tags) and tags.issubset(simple_list_tags):
+        log(
+            "WARN: Visual snippet was only a plain list; "
+            f"using fallback for '{section_title}'."
         )
         return build_fallback_visual(section_title, section_body, heading_label)
 
