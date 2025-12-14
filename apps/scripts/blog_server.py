@@ -83,7 +83,15 @@ MODEL_LLAMA3 = "llama3:8b"
 MODEL_CODEGEMMA = "qwen2.5-coder:7b"
 
 # Ollama リクエストのタイムアウトとリトライ設定（環境変数で上書き可能）
-OLLAMA_TIMEOUT_SEC = int(os.environ.get("BLOG_OLLAMA_TIMEOUT", "900"))
+# - モデルごとに個別の環境変数を用意しておき、なければ共通値を使う
+OLLAMA_TIMEOUT_SEC = int(os.environ.get("BLOG_OLLAMA_TIMEOUT", "1200"))
+MODEL_TIMEOUTS = {
+    MODEL_PHI3: int(os.environ.get("BLOG_PHI3_TIMEOUT", OLLAMA_TIMEOUT_SEC)),
+    MODEL_LLAMA3: int(os.environ.get("BLOG_LLAMA3_TIMEOUT", OLLAMA_TIMEOUT_SEC)),
+    MODEL_CODEGEMMA: int(
+        os.environ.get("BLOG_QWEN25_TIMEOUT", OLLAMA_TIMEOUT_SEC)
+    ),
+}
 OLLAMA_MAX_RETRIES = int(os.environ.get("BLOG_OLLAMA_MAX_RETRIES", "1"))
 
 DIAGRAM_LANG_CONFIG = {
@@ -186,6 +194,14 @@ def log(msg: str) -> None:
 # ====== 共通ユーティリティ =========================================
 
 
+def get_model_timeout(model: str, override: Optional[int] = None) -> int:
+    """Return timeout seconds for the given model with optional override."""
+
+    if override is not None:
+        return override
+    return MODEL_TIMEOUTS.get(model, OLLAMA_TIMEOUT_SEC)
+
+
 def call_ollama_generate(
     model: str,
     prompt: str,
@@ -208,7 +224,7 @@ def call_ollama_generate(
     }
     data = json.dumps(payload).encode("utf-8")
 
-    effective_timeout = timeout or OLLAMA_TIMEOUT_SEC
+    effective_timeout = get_model_timeout(model, timeout)
     attempts = OLLAMA_MAX_RETRIES + 1
     last_error: Optional[Exception] = None
 
@@ -504,7 +520,7 @@ def choose_index_with_phi3(keyword: str, files: List[Path]) -> Optional[Path]:
         {joined}
         """
     )
-    res = call_ollama_generate(MODEL_PHI3, prompt, timeout=600)
+    res = call_ollama_generate(MODEL_PHI3, prompt)
     m = re.search(r"\d+", res)
     if not m:
         log("WARN: phi3 から選択番号が取得できなかったため、先頭ファイルを採用します。")
@@ -536,10 +552,11 @@ def generate_metadata_with_phi3(
         トーン: シリアスだが読者に寄り添う穏やかな口調。
 
         以下のインデックス内容と Rahab Punkaholic Girls の曲リストを読み、
-        このテーマに沿ったブログ記事の
-        メタ情報を**すべて日本語**で作成してください。
-        インデックスに書かれていない事実は絶対に補わず、推測で埋めないでください。
-        わからない場合は「情報が不足している」と簡潔に書いてください。
+        このテーマに沿ったブログ記事のメタ情報を**すべて日本語**で作成してください。
+        - ディスクリプションとタグは、必ず <INDEX> に含まれる具体的な話題や固有名詞から拾ってください。
+        - タグは6つすべて異なるものを選び、重複や番号付けは禁止です。
+        - インデックスに書かれていない事実は絶対に補わず、推測で埋めないでください。
+        - わからない場合は「情報が不足している」と簡潔に書いてください。
 
         タイトル・ディスクリプション・タグ・概要のすべてで、
         上記の問題に対して解決策や前進の手がかりを提示する構成にしてください。
@@ -563,9 +580,65 @@ def generate_metadata_with_phi3(
         }}
         """
     )
-    res = call_ollama_generate(MODEL_PHI3, prompt, timeout=600)
+    res = call_ollama_generate(MODEL_PHI3, prompt)
     meta = extract_json_block(res) or {}
     return meta
+
+
+def reinforce_metadata_from_index(
+    keyword: str,
+    index_text: str,
+    rahab_context: str,
+    current: Dict[str, Any],
+) -> Dict[str, Any]:
+    """補完が必要な場合のみ、タグと説明をインデックス由来で再生成する。"""
+
+    description = str(current.get("description") or "").strip()
+    raw_tags = current.get("tags") if isinstance(current.get("tags"), list) else []
+    tags: List[str] = [str(t).strip() for t in raw_tags if str(t).strip()]
+    unique_tags = list(dict.fromkeys(tags))
+
+    need_description = not description
+    need_tags = len(unique_tags) < 6 or len(unique_tags) != len(tags)
+
+    if not (need_description or need_tags):
+        return current
+
+    prompt = textwrap.dedent(
+        f"""
+        次のインデックスに書かれている内容だけを使って、
+        ブログ記事のタグ6つとディスクリプションを**日本語で**作成してください。
+        テーマ: {keyword}
+
+        <INDEX>
+        {index_text}
+        </INDEX>
+
+        <RAHAB_TRACKS>
+        {rahab_context}
+        </RAHAB_TRACKS>
+
+        制約:
+        - タグは6つすべて異なる語句にし、番号付けや同じ語の繰り返しは避ける。
+        - タグはインデックス内の話題・固有名詞・キーワードを短くまとめたものにする。
+        - ディスクリプションは約200文字で、インデックスに書かれている事実だけで構成する。
+        - 情報が不足している場合は、その旨を短く明示する。
+        - JSON だけを返す。
+
+        {{
+          "description": "... 約200文字 ...",
+          "tags": ["タグ1", "タグ2", "タグ3", "タグ4", "タグ5", "タグ6"]
+        }}
+        """
+    )
+
+    regenerated = extract_json_block(call_ollama_generate(MODEL_PHI3, prompt)) or {}
+    merged = dict(current)
+    if regenerated.get("description"):
+        merged["description"] = regenerated.get("description")
+    if regenerated.get("tags"):
+        merged["tags"] = regenerated.get("tags")
+    return merged
 
 # ====== ステップ 3: 7 セクション構成 ================================
 
@@ -615,7 +688,7 @@ def generate_sections_with_phi3(
         """
     )
 
-    res = call_ollama_generate(MODEL_PHI3, prompt, timeout=600)
+    res = call_ollama_generate(MODEL_PHI3, prompt)
     sections = extract_json_list(res) or []
 
     cleaned: List[Dict[str, str]] = []
@@ -1439,7 +1512,7 @@ def main() -> None:
 
     log(f"Chosen index file: {chosen_index}")
     # コンテキスト量を抑えてパフォーマンス改善
-    index_text_full = read_text(chosen_index, max_chars=2000)
+    index_text_full = read_text(chosen_index, max_chars=4000)
     knowledge_text = collect_knowledge_text(chosen_index, max_chars=4000)
 
     rahab_tracks = fetch_rahab_tracks()
@@ -1452,6 +1525,7 @@ def main() -> None:
     # 3) メタ情報を phi3 で生成（日本語）
     log("Generating Japanese metadata with phi3...")
     meta_ja = generate_metadata_with_phi3(keyword, index_text_full, rahab_context)
+    meta_ja = reinforce_metadata_from_index(keyword, index_text_full, rahab_context, meta_ja)
     meta_ja = normalize_metadata(meta_ja, keyword, description_source=index_text_full[:240])
     if not meta_ja.get("title"):
         log("WARN: metadata title is empty; using keyword as fallback title.")
